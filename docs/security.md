@@ -36,6 +36,10 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 * The clock has 1 ms resolution by default but no deliberate jitter; timing side channels are not mitigated.
 * No process-level sandboxing, seccomp or cgroups yet. The architecture keeps a "one Orbit process per trust domain"
   deployment possible: nothing assumes all tenants share a process.
+* Instantiation runs under the invocation fuel budget. Where Wasmtime has no copy-on-write memory image (seen on
+  Windows and macOS CI runners), it charges fuel for data-segment initialisation, roughly one unit per byte of the host
+  pages touched (4097 for one 4 KiB page). Very small fuel budgets can therefore fail at instantiation on some
+  platforms and not on others.
 * The epoch ticker bounds deadline precision to one tick (default 10 ms).
 * No WASI, no networking, no filesystem, no threads in guests.
 * The ABI is version 1 and may still change before a stability declaration.
