@@ -143,6 +143,12 @@ impl Isolate {
         let instance = match instantiated {
             Ok(i) => i,
             Err(e) => {
+                let e = e.context(format!(
+                    "instantiation used {fuel_used} fuel of {}",
+                    limits
+                        .fuel
+                        .map_or_else(|| "unmetered".to_owned(), |f| f.to_string())
+                ));
                 let lim = &store.data().limiter;
                 return Err(if lim.memory_grow_denied + lim.table_grow_denied > 0 {
                     InstantiateError::ResourceLimit(format!("{e:#}"))

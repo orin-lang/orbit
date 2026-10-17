@@ -158,3 +158,23 @@ fn inspect_flags_invalid_modules() {
     assert!(!o.status.success());
     assert!(stdout(&o).contains("validation: FAILED"), "{}", stdout(&o));
 }
+
+#[test]
+fn run_with_small_fuel_budget_still_instantiates() {
+    let o = orbit(&[
+        "run",
+        &path("hello.wat"),
+        "--grant",
+        "log/v1",
+        "--invoke",
+        "add",
+        "--arg",
+        "1",
+        "--arg",
+        "2",
+        "--fuel",
+        "10000",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "3");
+}
