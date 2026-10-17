@@ -18,7 +18,7 @@ cargo bench -p orbit-runtime
 |---|---|
 | `orbit-abi` | versioned host ABI: capability ids, signatures, status codes, manifest (no engine dependency) |
 | `orbit-runtime` | shared engine, validated and cached artifacts, isolates, limits, admission control, metrics |
-| `orbit-caps` | capabilities `log/v1`, `clock/v1`, `random/v1`, `kv/v1` and their adapters |
+| `orbit-caps` | capabilities `log/v1`, `clock/v1`, `random/v1`, `kv/v1`, the restricted WASI preview 1 shim `wasi_p1/v1`, and their adapters |
 | `orbit-cli` | the `orbit` command (`run`, `inspect`) |
 
 Documentation: [architecture](docs/architecture.md) · [host ABI](docs/host-abi.md) ·
