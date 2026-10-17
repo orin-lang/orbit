@@ -104,7 +104,7 @@ fn run_rejects_unknown_imports_missing_files_and_bad_flags() {
     let o = orbit(&["run", &path("bad_import.wat")]);
     assert!(!o.status.success());
     assert!(
-        stderr(&o).contains("unknown import `wasi_snapshot_preview1.fd_write`"),
+        stderr(&o).contains("unknown import `wasi_snapshot_preview1.path_open`"),
         "{}",
         stderr(&o)
     );
@@ -227,5 +227,166 @@ fn run_kv_grant_and_namespaces() {
         stderr(&o).contains("--kv-namespace requires --grant kv/v1"),
         "{}",
         stderr(&o)
+    );
+}
+
+fn caps_fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../orbit-caps/tests/fixtures")
+        .join(name)
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn wasi_requires_its_own_grant() {
+    let o = orbit(&["run", &caps_fixture("wasi_hello.wasm")]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("capability not granted: wasi_p1/v1"),
+        "{}",
+        stderr(&o)
+    );
+    // The grant is by capability id; the import module name is not a grant spelling that
+    // needs special handling, but unknown ids are rejected.
+    let o = orbit(&[
+        "run",
+        &caps_fixture("wasi_hello.wasm"),
+        "--grant",
+        "wasi/v1",
+    ]);
+    assert!(stderr(&o).contains("no such capability"), "{}", stderr(&o));
+    let o = orbit(&["run", &path("hello.wat"), "--wasi-arg", "x"]);
+    assert!(
+        stderr(&o).contains("--wasi-arg/--wasi-env require --grant wasi_p1/v1"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn wasi_command_module_runs_start_and_exits_with_the_guest_code() {
+    let o = orbit(&["run", &path("command.wat"), "--grant", "wasi_p1/v1"]);
+    assert_eq!(o.status.code(), Some(9), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("[info] cli/i-1: command"),
+        "{}",
+        stderr(&o)
+    );
+    // --invoke runs that export instead of `_start`.
+    let o = orbit(&[
+        "run",
+        &path("command.wat"),
+        "--grant",
+        "wasi_p1/v1",
+        "--invoke",
+        "helper",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "5");
+}
+
+#[test]
+fn rust_program_gets_args_env_and_exit_code() {
+    let wasm = caps_fixture("wasi_hello.wasm");
+    let o = orbit(&["run", &wasm, "--grant", "wasi_p1/v1"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stderr(&o).contains("[info] cli/i-1: hello from wasi"));
+    assert!(stderr(&o).contains(r#"args=["main"]"#));
+    assert!(stderr(&o).contains("[warn] cli/i-1: this goes to stderr"));
+
+    let o = orbit(&[
+        "run",
+        &wasm,
+        "--grant",
+        "wasi_p1/v1",
+        "--wasi-arg",
+        "exit",
+        "--wasi-arg",
+        "3",
+    ]);
+    assert_eq!(o.status.code(), Some(3), "{}", stderr(&o));
+    assert!(stderr(&o).contains(r#"args=["main", "exit", "3"]"#));
+
+    let o = orbit(&[
+        "run",
+        &wasm,
+        "--grant",
+        "wasi_p1/v1",
+        "--wasi-arg",
+        "env",
+        "--wasi-env",
+        "K=v=1",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains(r#"env=[("K", "v=1")]"#),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = orbit(&[
+        "run",
+        &wasm,
+        "--grant",
+        "wasi_p1/v1",
+        "--wasi-env",
+        "novalue",
+    ]);
+    assert!(stderr(&o).contains("expected K=V"), "{}", stderr(&o));
+}
+
+#[test]
+fn rust_system_time_fails_without_the_clock_grant() {
+    let wasm = caps_fixture("wasi_hello.wasm");
+    let base = [
+        "run",
+        wasm.as_str(),
+        "--grant",
+        "wasi_p1/v1",
+        "--wasi-arg",
+        "time",
+    ];
+    let o = orbit(&base);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("panicked"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("`_start` failed"), "{}", stderr(&o));
+
+    let mut with_clock = base.to_vec();
+    with_clock.extend(["--grant", "clock/v1"]);
+    let o = orbit(&with_clock);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stderr(&o).contains("unix_secs="), "{}", stderr(&o));
+}
+
+#[test]
+fn c_program_runs_through_the_cli() {
+    let o = orbit(&[
+        "run",
+        &caps_fixture("wasi_c.wasm"),
+        "--grant",
+        "wasi_p1/v1",
+        "--wasi-arg",
+        "e",
+        "--wasi-arg",
+        "4",
+        "--wasi-env",
+        "GREETING=hello",
+    ]);
+    assert_eq!(o.status.code(), Some(4), "{}", stderr(&o));
+    assert!(stderr(&o).contains("GREETING=hello"), "{}", stderr(&o));
+}
+
+#[test]
+fn inspect_shows_the_wasi_capability() {
+    let o = orbit(&["inspect", &caps_fixture("wasi_hello.wasm")]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert!(stdout(&o).contains("wasi_snapshot_preview1.fd_write"));
+    assert!(stdout(&o).contains("[capability wasi_p1/v1]"));
+    assert!(
+        stdout(&o).contains("requires: wasi_p1/v1"),
+        "{}",
+        stdout(&o)
     );
 }

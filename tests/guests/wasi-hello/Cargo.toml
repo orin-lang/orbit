@@ -1,0 +1,17 @@
+[package]
+name = "wasi-hello"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A standalone project (excluded from the Orbit workspace): built for wasm32-wasip1 by
+# tests/guests/build.sh, and the resulting .wasm is committed as a test fixture.
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
