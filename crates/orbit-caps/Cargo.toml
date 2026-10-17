@@ -1,6 +1,6 @@
 [package]
 name = "orbit-caps"
-description = "Orbit capability implementations (log, and later clock, random, kv)"
+description = "Orbit capability implementations (log, clock, random, kv)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ orbit-abi.workspace = true
 orbit-runtime.workspace = true
 wasmtime.workspace = true
 serde_json.workspace = true
+getrandom = "0.3"
 
 [dev-dependencies]
 tokio.workspace = true
