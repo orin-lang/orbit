@@ -1,0 +1,10 @@
+# Architecture decision records
+
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-wasmtime-as-engine.md) | Wasmtime as the execution engine | accepted |
+| [0002](0002-core-wasm-abi-before-component-model.md) | A core-WebAssembly host ABI before the Component Model | accepted |
+| [0003](0003-deny-by-default-linking-and-manifests.md) | Deny-by-default linking; manifests describe, grants authorise | accepted |
+| [0004](0004-64-bit-pointers-in-the-abi.md) | 64-bit pointers and lengths in the ABI | accepted |
+| [0005](0005-async-isolates-and-epoch-time-slices.md) | Async isolates with epoch time slices, no thread per isolate | accepted |
+| [0006](0006-shared-adapters-per-instance-handles.md) | Shared host adapters, per-instance handles | accepted |
