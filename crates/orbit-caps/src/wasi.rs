@@ -365,7 +365,7 @@ fn gather(caller: &mut Caller<'_, HostState>, iovs: i32, iovs_len: i32) -> Resul
     }
     let table = get(caller, iovs, count * 8, u64::from(WASI_MAX_IOVS) * 8)?;
     let mut data: Vec<u8> = Vec::new();
-    for iov in table.chunks_exact(8) {
+    for iov in table.as_chunks::<8>().0 {
         let ptr = u32::from_le_bytes([iov[0], iov[1], iov[2], iov[3]]);
         let len = u32::from_le_bytes([iov[4], iov[5], iov[6], iov[7]]);
         let room = WASI_WRITE_MAX_BYTES - data.len() as u64;
