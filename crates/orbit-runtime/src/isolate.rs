@@ -11,7 +11,7 @@ use wasmtime::{Func, Instance, Memory, Store, Trap, UpdateDeadline, Val, ValType
 use crate::IsolateState;
 use crate::artifact::Artifact;
 use crate::capability::{Capability, Grants, InstanceId, InstanceInfo, TenantId};
-use crate::error::{ExecError, InstantiateError};
+use crate::error::{ExecError, GuestExit, InstantiateError};
 use crate::host::HostState;
 use crate::lifecycle::Lifecycle;
 use crate::limits::Limits;
@@ -86,6 +86,7 @@ pub struct Isolate {
     semaphore: Arc<Semaphore>,
     reservation: Option<MemoryReservation>,
     failure: Option<ExecError>,
+    exit_code: Option<i32>,
     fuel_total: u64,
     invocations: u64,
     last: Option<InvocationMetrics>,
@@ -113,6 +114,7 @@ impl Isolate {
             instance_id: id,
             tenant: tenant.clone(),
             max_log_bytes: limits.max_log_bytes,
+            grants: grants.clone(),
         };
         let mut host = HostState::new(info.clone(), &limits);
         for cap in artifact.linked() {
@@ -171,6 +173,7 @@ impl Isolate {
             semaphore,
             reservation: Some(reservation),
             failure: None,
+            exit_code: None,
             fuel_total: fuel_used,
             invocations: 0,
             last: None,
@@ -201,6 +204,15 @@ impl Isolate {
     #[must_use]
     pub fn failure(&self) -> Option<&ExecError> {
         self.failure.as_ref()
+    }
+
+    /// The code of the guest's `proc_exit` call, if it made one. `proc_exit(0)` leaves the
+    /// isolate [`Terminated`](IsolateState::Terminated) and the call that made it returns
+    /// `Ok`; a non-zero code leaves it [`Failed`](IsolateState::Failed) with
+    /// [`ExecError::Exit`].
+    #[must_use]
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
     }
 
     /// The limits this isolate was created with.
@@ -464,6 +476,9 @@ impl Isolate {
     }
 
     fn classify(&self, e: &wasmtime::Error, denied_before: u64) -> ExecError {
+        if let Some(GuestExit(code)) = e.downcast_ref::<GuestExit>() {
+            return ExecError::Exit(*code);
+        }
         match e.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => ExecError::OutOfFuel,
             Some(Trap::Interrupt) => ExecError::DeadlineExceeded,
@@ -498,11 +513,28 @@ impl Isolate {
         });
         if let Some(store) = self.store.as_mut() {
             store.data_mut().deadline = None;
+            for cap in &self.caps {
+                if let Some(s) = store.data_mut().cap_state_dyn(&cap.id()) {
+                    cap.end_invocation(s);
+                }
+            }
         }
         if count {
             self.invocations += 1;
         }
         match outcome {
+            Err(ExecError::Exit(0)) => {
+                // A clean `proc_exit`: the program is finished and cannot be re-entered.
+                self.exit_code = Some(0);
+                self.terminate();
+                Ok(())
+            }
+            Err(ExecError::Exit(code)) => {
+                self.exit_code = Some(code);
+                let e = ExecError::Exit(code);
+                self.fail(e.clone());
+                Err(e)
+            }
             Ok(()) => {
                 let _ = self.state.transition(ok_state);
                 Ok(())

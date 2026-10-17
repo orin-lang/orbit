@@ -40,12 +40,13 @@ Orin, std, the program) is unchanged. Allocation, memcpy and formatting stay ins
 
 ### WASI or `orbit:*`?
 
-The roadmap names `wasm64-wasip1` with wasi-libc. Orbit milestone 1 does **not** link WASI, for three reasons
-([ADR-0003](adr/0003-deny-by-default-linking-and-manifests.md)): WASI preview 1 has no notion of Orin's grant narrowing
-beyond preopened directories; its ambient `environ_get`, `clock_time_get` and `random_get` would be reachable without a
-grant; and the target workloads (HTTP, streams, KV, brokers) are outside WASI preview 1 anyway. A restricted WASI
-preview 1 shim (only `fd_write` to the log sink, `proc_exit`, nothing else) is on the roadmap so `clang`-produced
-modules can run before an Orbit-specific L0 exists.
+The roadmap names `wasm64-wasip1` with wasi-libc. Orbit serves a **restricted** WASI preview 1 (`wasi_p1/v1`,
+[ADR-0007](adr/0007-restricted-wasi-preview1-shim.md), [host-abi.md](host-abi.md) §4a) for **wasm32 modules only**:
+stdout/stderr go to the log sink, there are no preopened directories, argv and environment come only from the grant,
+and clocks and randomness work only when `clock/v1` / `random/v1` are granted as well. An Orin `wasm32-wasip1` build
+therefore runs unchanged. WASI preview 1 is not defined for 64-bit memories, so **wasm64 needs the `orbit:*` L0
+(option A)**; that is the path the Orin WebAssembly work takes (wasm64, own L0, importing only `orbit:*`, today
+`orbit:log/v1`).
 
 ## 3. Requests to the Orin compiler project (proposed, not implemented)
 

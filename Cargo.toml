@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/orbit-abi", "crates/orbit-runtime", "crates/orbit-caps", "crates/orbit-cli"]
+# Standalone guest programs built for wasm32 (see tests/guests/build.sh).
+exclude = ["tests/guests/wasi-hello"]
 
 [workspace.package]
 version = "0.1.0"

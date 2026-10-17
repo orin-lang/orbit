@@ -13,8 +13,8 @@ pub enum LoadError {
     /// Compilation failed.
     #[error("compilation failed: {0}")]
     Compile(String),
-    /// The module imports something that is not part of the host ABI (`env.foo`,
-    /// `wasi_snapshot_preview1.*`, an unknown capability/major version or function).
+    /// The module imports something that is not part of the host ABI (`env.foo`, a WASI
+    /// function the shim does not implement, an unknown capability/major version or function).
     #[error("unknown import `{module}.{name}`")]
     UnknownImport {
         /// Import module name.
@@ -47,6 +47,17 @@ pub enum LoadError {
     /// The module uses pointer-taking imports but does not export `memory`.
     #[error("module imports `{module}.{name}` which needs guest memory, but exports no `memory`")]
     MissingMemoryExport {
+        /// Import module name.
+        module: String,
+        /// Import field name.
+        name: String,
+    },
+    /// The module imports a capability that is defined for 32-bit memories only (WASI
+    /// preview 1) but its exported `memory` is a 64-bit memory.
+    #[error(
+        "import `{module}.{name}` is wasm32-only (its pointers are i32) but the module's exported `memory` is a 64-bit memory"
+    )]
+    Memory64Unsupported {
         /// Import module name.
         module: String,
         /// Import field name.
@@ -147,10 +158,31 @@ pub enum ExecError {
     /// `orbit_init` returned a non-zero status.
     #[error("orbit_init returned {0}")]
     InitFailed(i32),
+    /// The guest called `proc_exit` (WASI) with a non-zero code. `proc_exit(0)` is not an
+    /// error: the call returns `Ok` and [`Isolate::exit_code`](crate::Isolate::exit_code)
+    /// is `Some(0)`.
+    #[error("guest exited with code {0}")]
+    Exit(i32),
     /// The runtime was shut down while the invocation waited for a slot.
     #[error("runtime is shut down")]
     Closed,
 }
+
+/// The error a host function returns to end the current invocation with an exit code.
+///
+/// `orbit-caps`' WASI shim returns `Err(wasmtime::Error::new(GuestExit(code)))` from
+/// `proc_exit`; the isolate recognises it and reports [`ExecError::Exit`] (or success for
+/// code 0) instead of a trap. Wasmtime unwinds the guest stack when a host function errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestExit(pub i32);
+
+impl std::fmt::Display for GuestExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guest exited with code {}", self.0)
+    }
+}
+
+impl std::error::Error for GuestExit {}
 
 /// The engine could not be created (invalid configuration or platform limits).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

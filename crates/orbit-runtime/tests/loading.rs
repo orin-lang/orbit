@@ -15,8 +15,8 @@ fn unknown_imports_are_rejected() {
     let (rt, _) = runtime();
     let e = err(
         &rt,
-        r#"(module (import "wasi_snapshot_preview1" "fd_write"
-            (func (param i32 i32 i32 i32) (result i32))))"#,
+        r#"(module (import "wasi_snapshot_preview1" "path_open"
+            (func (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32))))"#,
     );
     assert!(
         matches!(e, LoadError::UnknownImport { ref module, .. } if module == "wasi_snapshot_preview1"),

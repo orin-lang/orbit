@@ -15,7 +15,8 @@ use crate::capability::{InstanceId, InstanceInfo, TenantId};
 pub struct HostMetrics {
     /// Host function calls per capability.
     pub calls: HashMap<CapabilityId, u64>,
-    /// Bytes accepted by `orbit:log/v1` (messages that were rejected are not counted).
+    /// Bytes accepted by `orbit:log/v1` and by the WASI shim's stdout/stderr (rejected
+    /// messages are not counted).
     pub bytes_logged: u64,
 }
 

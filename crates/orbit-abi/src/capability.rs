@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::IMPORT_PREFIX;
+use crate::{IMPORT_PREFIX, WASI_P1_IMPORT_MODULE};
 
 /// Core WebAssembly value kinds used in the ABI (integers only).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,6 +67,12 @@ pub struct CapabilitySpec {
     pub major: u32,
     /// Functions of this version.
     pub funcs: &'static [FuncSig],
+    /// A literal import module name that replaces the `orbit:<name>/v<major>` form, for
+    /// capabilities that expose an existing external ABI (WASI preview 1).
+    pub module: Option<&'static str>,
+    /// Whether the capability is defined for 32-bit linear memories only (its pointers are
+    /// `i32`); a module with a 64-bit memory that imports it is rejected at load.
+    pub wasm32_only: bool,
 }
 
 impl CapabilitySpec {
@@ -117,6 +123,8 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         name: "log",
         major: 1,
         funcs: &[mem_sig("write", &[I32, I64, I64], &[I32])],
+        module: None,
+        wasm32_only: false,
     },
     CapabilitySpec {
         name: "clock",
@@ -125,11 +133,15 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
             sig("now_unix_nanos", &[], &[I64]),
             sig("monotonic_nanos", &[], &[I64]),
         ],
+        module: None,
+        wasm32_only: false,
     },
     CapabilitySpec {
         name: "random",
         major: 1,
         funcs: &[mem_sig("fill", &[I64, I64], &[I32])],
+        module: None,
+        wasm32_only: false,
     },
     CapabilitySpec {
         name: "kv",
@@ -141,7 +153,42 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
             mem_sig("delete", &[I64, I64, I64], &[I32]),
             sig("close", &[I64], &[I32]),
         ],
+        module: None,
+        wasm32_only: false,
     },
+    CapabilitySpec {
+        name: "wasi_p1",
+        major: 1,
+        funcs: WASI_P1_FUNCS,
+        module: Some(WASI_P1_IMPORT_MODULE),
+        wasm32_only: true,
+    },
+];
+
+/// The functions of the restricted WASI preview 1 shim (`wasi_snapshot_preview1`), with
+/// their exact WASI signatures (pointers and sizes are `i32`, offsets and timestamps `i64`,
+/// every function returns an errno as `i32` except `proc_exit`). Only functions the host
+/// implements are listed; any other `wasi_snapshot_preview1` import fails at load.
+pub static WASI_P1_FUNCS: &[FuncSig] = &[
+    mem_sig("args_get", &[I32, I32], &[I32]),
+    mem_sig("args_sizes_get", &[I32, I32], &[I32]),
+    mem_sig("environ_get", &[I32, I32], &[I32]),
+    mem_sig("environ_sizes_get", &[I32, I32], &[I32]),
+    mem_sig("clock_res_get", &[I32, I32], &[I32]),
+    mem_sig("clock_time_get", &[I32, I64, I32], &[I32]),
+    sig("fd_close", &[I32], &[I32]),
+    mem_sig("fd_fdstat_get", &[I32, I32], &[I32]),
+    sig("fd_fdstat_set_flags", &[I32, I32], &[I32]),
+    mem_sig("fd_filestat_get", &[I32, I32], &[I32]),
+    sig("fd_prestat_get", &[I32, I32], &[I32]),
+    sig("fd_prestat_dir_name", &[I32, I32, I32], &[I32]),
+    mem_sig("fd_read", &[I32, I32, I32, I32], &[I32]),
+    sig("fd_seek", &[I32, I64, I32, I32], &[I32]),
+    mem_sig("fd_write", &[I32, I32, I32, I32], &[I32]),
+    sig("poll_oneoff", &[I32, I32, I32, I32], &[I32]),
+    sig("proc_exit", &[I32], &[]),
+    mem_sig("random_get", &[I32, I32], &[I32]),
+    sig("sched_yield", &[], &[I32]),
 ];
 
 /// Finds the spec of a capability id, if it is part of ABI v1.
@@ -214,10 +261,20 @@ impl CapabilityId {
         self.major
     }
 
-    /// Import module name form, `orbit:log/v1`.
+    /// `wasi_p1/v1`: the restricted WASI preview 1 shim, imported as `wasi_snapshot_preview1`.
+    #[must_use]
+    pub fn wasi_p1_v1() -> Self {
+        Self::new("wasi_p1", 1)
+    }
+
+    /// Import module name form, `orbit:log/v1` (or the literal module of a capability that
+    /// defines one, `wasi_snapshot_preview1`).
     #[must_use]
     pub fn import_module(&self) -> String {
-        format!("{IMPORT_PREFIX}{}", self.manifest_form())
+        match spec(self).and_then(|s| s.module) {
+            Some(literal) => literal.to_owned(),
+            None => format!("{IMPORT_PREFIX}{}", self.manifest_form()),
+        }
     }
 
     /// Manifest form, `log/v1`.
@@ -226,14 +283,22 @@ impl CapabilityId {
         format!("{}/v{}", self.name, self.major)
     }
 
-    /// Parses an import module name (`orbit:log/v1`).
+    /// Parses an import module name (`orbit:log/v1`, or a capability's literal module such
+    /// as `wasi_snapshot_preview1`).
+    ///
+    /// A capability that defines a literal module is only recognised under that name, never
+    /// as `orbit:<name>/v<major>`.
     ///
     /// # Errors
     /// Returns [`IdParseError`] when the prefix is missing or the rest is malformed.
     pub fn from_import_module(module: &str) -> Result<Self, IdParseError> {
+        if let Some(s) = CAPABILITIES.iter().find(|s| s.module == Some(module)) {
+            return Ok(s.id());
+        }
         module
             .strip_prefix(IMPORT_PREFIX)
             .and_then(|rest| Self::from_manifest_form(rest).ok())
+            .filter(|id| spec(id).is_none_or(|s| s.module.is_none()))
             .ok_or_else(|| IdParseError(module.to_owned()))
     }
 
@@ -272,7 +337,7 @@ impl FromStr for CapabilityId {
 
     /// Accepts both `orbit:log/v1` and `log/v1`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.starts_with(IMPORT_PREFIX) {
+        if s.starts_with(IMPORT_PREFIX) || s == WASI_P1_IMPORT_MODULE {
             Self::from_import_module(s)
         } else {
             Self::from_manifest_form(s)
@@ -319,7 +384,32 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 4);
+        assert_eq!(CAPABILITIES.len(), 5);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
+    }
+
+    #[test]
+    fn wasi_p1_uses_its_literal_module_only() {
+        let id = CapabilityId::wasi_p1_v1();
+        assert_eq!(id.to_string(), "wasi_p1/v1");
+        assert_eq!(id.import_module(), "wasi_snapshot_preview1");
+        assert_eq!("wasi_p1/v1".parse::<CapabilityId>().unwrap(), id);
+        assert_eq!(
+            "wasi_snapshot_preview1".parse::<CapabilityId>().unwrap(),
+            id
+        );
+        let s = import_module("wasi_snapshot_preview1").unwrap();
+        assert!(s.wasm32_only);
+        assert_eq!(s.id(), id);
+        assert_eq!(
+            s.func("fd_seek").unwrap().to_string(),
+            "fd_seek(i32, i64, i32, i32) -> i32"
+        );
+        assert_eq!(s.func("proc_exit").unwrap().to_string(), "proc_exit(i32)");
+        assert!(s.func("path_open").is_none());
+        // Not reachable under the orbit: prefix, nor under another preview.
+        assert!(import_module("orbit:wasi_p1/v1").is_none());
+        assert!(import_module("wasi_snapshot_preview2").is_none());
+        assert!("orbit:wasi_p1/v1".parse::<CapabilityId>().is_err());
     }
 }

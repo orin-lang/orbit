@@ -8,7 +8,8 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 | Property | Mechanism | Tested by |
 |---|---|---|
 | memory isolation between instances | one Wasmtime `Store` per isolate; bounds-checked linear memory | state-isolation tests |
-| no ambient authority | only granted `orbit:*` capabilities are linked; WASI and arbitrary imports are rejected at load | denied-capability and unknown-import tests |
+| no ambient authority | only granted capabilities are linked (`orbit:*` and the `wasi_p1/v1` shim); arbitrary imports and every WASI function the shim does not implement (all path, socket and file functions) are rejected at load | denied-capability and unknown-import tests |
+| WASI has no hidden authority | stdout/stderr go to the log sink under the log budget; stdin is empty; no preopens; argv/env only from the grant; clock and random answer `ENOTCAPABLE` unless `clock/v1` / `random/v1` are also granted | `crates/orbit-caps/tests/wasi.rs`, `wasi_toolchain.rs` |
 | host input validation | every guest `(ptr, len)` is checked against the current memory size with overflow-checked `u64` arithmetic | out-of-bounds / overflow / invalid UTF-8 tests (wasm32 and wasm64) |
 | bounded memory | `ResourceLimiter` caps linear memory and tables; admission control caps the sum | memory-growth tests |
 | bounded CPU | fuel per invocation; epoch-based wall-clock deadline | runaway-loop tests |
@@ -41,7 +42,12 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
   pages touched (4097 for one 4 KiB page). Very small fuel budgets can therefore fail at instantiation on some
   platforms and not on others.
 * The epoch ticker bounds deadline precision to one tick (default 10 ms).
-* No WASI, no networking, no filesystem, no threads in guests.
+* WASI is a restricted preview 1 subset ([host-abi.md](host-abi.md) section 4a): no filesystem (no preopens, no
+  `path_*`), no sockets, no `poll_oneoff`, no threads, no networking in guests. It is wasm32-only. Guest stdout and
+  stderr are untrusted text delivered to the host's log sink: sinks must treat it as data (a line can contain
+  anything, including terminal escape sequences).
+* `proc_exit(0)` terminates the isolate, so a WASI command cannot be invoked twice; run a command module once, or
+  build a reactor (`_initialize`) for repeated calls.
 * The ABI is version 1 and may still change before a stability declaration.
 
 ## Hardening path

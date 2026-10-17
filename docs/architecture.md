@@ -19,7 +19,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
                                                         │
  orbit-caps ────────────────────────────────────────────┼──────────────────────────────────────────────────
-   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1
+   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  wasi_p1/v1 (wasi_snapshot_preview1)
    adapters     LogSink (stderr, memory)   KvStore (in-memory, tenant-scoped)   ... later: Postgres pool, Kafka, S3
                                                         │
  orbit-abi ─────────────────────────────────────────────┴──────────────────────────────────────────────────
@@ -68,6 +68,14 @@ not per isolate; ownership and tenant scoping are enforced in the capability lay
 Authority has exactly one source: the **grant** the embedder passes to `spawn_isolate` (the CLI's `--grant`). The
 manifest and the import list say what a module *needs*; they never give it anything ([ADR-0003](adr/0003-deny-by-default-linking-and-manifests.md)).
 
+`wasi_p1/v1` is the same kind of object with a different import module name: a restricted WASI preview 1 shim whose
+stdout/stderr feed the log sink, whose clock and random functions are only live when `clock/v1` / `random/v1` are
+granted too (it reads the clock capability's time source and resolution rather than keeping its own), and whose
+`proc_exit` is a host error (`GuestExit`) the isolate turns into an exit code. To flush its line buffers when an
+invocation ends, the `Capability` trait has an `end_invocation` hook next to `begin_invocation`, and `InstanceInfo`
+carries the isolate's grants so a capability can see which others were granted
+([ADR-0007](adr/0007-restricted-wasi-preview1-shim.md)).
+
 Handles (KV namespaces, later files, sockets, streams) live in a per-instance handle table: an index plus a generation,
 never a host pointer. A handle from another instance or a closed handle is `ERR_BAD_HANDLE`; terminating an instance
 drops its table.
@@ -88,4 +96,4 @@ drops its table.
 
 See [adr/](adr/): Wasmtime (0001), a core-wasm ABI before the Component Model (0002), deny-by-default linking and
 manifests as description (0003), 64-bit pointers in the ABI (0004), async isolates with epoch time slices (0005),
-shared adapters with per-instance handles (0006).
+shared adapters with per-instance handles (0006), the restricted WASI preview 1 shim (0007).
