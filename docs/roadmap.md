@@ -9,8 +9,11 @@ ABI with four capabilities (log, clock, random, in-memory KV), deny-by-default g
 admission control, metrics, `orbit` CLI, integration tests, Criterion benchmarks, CI, ADRs.
 
 ## Milestone 2 — make Orin run
-1. Restricted WASI preview 1 shim (`fd_write` -> log sink, `proc_exit`, `args`/`environ` empty) so `clang
-   --target=wasm32/wasm64-wasip1` output from Orin's LLVM backend can run unchanged. Granted like any capability.
+1. ~~Restricted WASI preview 1 shim~~ **done** (`wasi_p1/v1`, [ADR-0007](adr/0007-restricted-wasi-preview1-shim.md)):
+   `fd_write` -> log sink, `proc_exit`, `args`/`environ` from the grant, clock and random only with `clock/v1` /
+   `random/v1`; command modules run via `_start`; tested with real Rust and C (clang + wasi-libc) builds. It is
+   wasm32-only: `wasm64-wasip1` output cannot use it (WASI preview 1 has 32-bit pointers), so a wasm64 Orin build
+   keeps using the `orbit:*` capabilities.
 2. Work with the Orin project on an `orbit` L0 and the `orbit.manifest` section ([orin-integration.md](orin-integration.md) §3).
 3. `orbit_alloc` and byte payloads for invocations (host-to-guest buffers).
 

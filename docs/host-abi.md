@@ -1,6 +1,7 @@
 # Orbit host ABI, version 1
 
-Status: **implemented in milestone 1** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1` and `orbit:kv/v1`.
+Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1) and
+`wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a).
 Everything marked *reserved* is a design, not a feature.
 
 This document is the contract between a guest module (an Orin program compiled to WebAssembly, or any other module)
@@ -12,7 +13,8 @@ version can follow.
 
 * The ABI as a whole has a version (`ORBIT_ABI_VERSION = 1`, crate `orbit-abi`).
 * Every capability is versioned on its own. Its import module name is `orbit:<capability>/v<major>`, for example
-  `orbit:log/v1`. A host may serve several majors of one capability at once; a guest imports exactly one.
+  `orbit:log/v1`; the one exception is `wasi_p1/v1`, which keeps the literal module name
+  `wasi_snapshot_preview1` that standard toolchains emit (section 4a). A host may serve several majors of one capability at once; a guest imports exactly one.
 * Inside a major version functions may be **added**, never changed or removed. A guest that imports a function the
   host's version does not have fails to load with `unknown import` (fail closed, never a trap at call time).
 
@@ -90,12 +92,60 @@ Keys are 1 byte to 1 KiB (an empty key is `ERR_INVALID`), values at most 1 MiB. 
 handle reports `ERR_BAD_HANDLE` even when a buffer is also invalid. The namespaces an instance may open are part of its grant; the storage of a
 namespace is scoped by tenant, so two tenants opening `"cache"` never see each other's keys.
 
+## 4a. `wasi_p1/v1`: restricted WASI preview 1
+
+A compatibility shim so modules built by standard toolchains (clang with wasi-libc, Rust's `wasm32-wasip1`) run
+unchanged ([ADR-0007](adr/0007-restricted-wasi-preview1-shim.md)). It is **an ordinary capability**: manifest form
+`wasi_p1/v1` (underscore, because capability names are `[a-z0-9_]`), granted with `--grant wasi_p1/v1`, never linked
+without a grant. Differences from every `orbit:*` capability:
+
+* the import module is the literal **`wasi_snapshot_preview1`** (`orbit:wasi_p1/v1` is *not* an import module name);
+* the signatures are the exact WASI ones: pointers and sizes are **`i32`**, `fd_seek` offset and the `clock_time_get`
+  precision are `i64`, functions return a WASI **errno** (`u16` in an `i32`; 0 is success) instead of the ABI status
+  codes of section 3, and `proc_exit` returns nothing;
+* WASI preview 1 is **wasm32-only**. A module whose exported `memory` is a 64-bit memory and that imports any
+  `wasi_snapshot_preview1` function is rejected at load (`LoadError::Memory64Unsupported`). A wasm64 Orin build has to
+  use the `orbit:*` capabilities.
+
+Only the functions below exist. **Any other `wasi_snapshot_preview1` import (`path_open`, `fd_pread`, `sock_*`, ...)
+fails at load with `unknown import`**, so there is no WASI function that exists but quietly refuses. Pointers are
+checked like everywhere else; a bad pointer is `EFAULT` (21), never a trap.
+
+| Function | Behaviour |
+|---|---|
+| `fd_write(fd, iovs, n, nwritten)` | fd 1 (stdout) -> the host log sink at **info**, fd 2 (stderr) -> **warn**. Output is split into lines per instance and per stream, a record has no trailing newline, an unterminated line is cut at 16 KiB, and whatever is buffered is flushed **when the invocation ends** (return, trap, exit or deadline) and on `fd_close`. A call accepts at most 1 MiB (a longer write is partial) and at most 1024 iovecs (`EINVAL`). Bytes count against the instance's per-invocation log budget (`Limits::max_log_bytes`, also reported in `bytes_logged`); a partial write is returned when the budget runs out, `ENOSPC` (51) when nothing fits. Any other fd, or a closed one: `EBADF` (8). |
+| `fd_read(fd, iovs, n, nread)` | stdin is always empty: fd 0 reads 0 bytes (EOF). Other fds: `EBADF`. |
+| `fd_close(fd)` | closes fd 0/1/2 (later use is `EBADF`); otherwise `EBADF`. |
+| `fd_seek(fd, off, whence, out)` | stdio is a stream: `ESPIPE` (70); other fds `EBADF`. |
+| `fd_fdstat_get(fd, buf)`, `fd_filestat_get(fd, buf)`, `fd_fdstat_set_flags(fd, flags)` | fds 0-2 are character devices (filetype 2, size 0, read right for 0, write right for 1 and 2, no path rights); `set_flags` accepts and ignores. Other fds `EBADF`. |
+| `fd_prestat_get(fd, buf)`, `fd_prestat_dir_name(fd, p, len)` | always `EBADF`: **there are no preopened directories**. |
+| `args_sizes_get`, `args_get` | argv is `["main"]` unless the grant config has `"args": [...]`, which is the *complete* argv (argv[0] included; an empty list gives an empty argv). Non-string entries and entries containing NUL are dropped. |
+| `environ_sizes_get`, `environ_get` | empty unless the grant config has `"env": {"K": "V", ...}` (sorted by key; non-string values, empty keys, keys containing `=` and NULs are dropped). The host's own arguments and environment are never visible. |
+| `clock_time_get(id, precision, out)`, `clock_res_get(id, out)` | `ENOTCAPABLE` (76) **unless the instance is also granted `clock/v1`**. Then ids 0 (realtime) and 1 (monotonic, since instance creation) use the same time source and the same coarsening (`resolution_ns` of the `clock/v1` grant, default 1 ms) as `orbit:clock/v1`; ids 2 and 3 (CPU time) are `ENOTSUP` (58), others `EINVAL` (28). The requested precision is ignored. |
+| `random_get(buf, len)` | `ENOTCAPABLE` **unless the instance is also granted `random/v1`**; then at most 64 KiB per call (`EINVAL` above), OS CSPRNG. Rust's `HashMap` seeds itself with `random_get`, so Rust programs that use one need `random/v1`. |
+| `sched_yield()` | success, no effect. |
+| `poll_oneoff(...)` | `ENOSYS` (52). |
+| `proc_exit(code)` | ends the invocation (section 5). |
+
+**Grant config** (an object, all keys optional): `{"args": ["main", "--flag"], "env": {"MODE": "prod"}}`. On the CLI:
+`--grant wasi_p1/v1 --wasi-arg --flag --wasi-env MODE=prod` (`--wasi-arg` values come after `main`).
+
+**`proc_exit`**: the host function unwinds the guest with `GuestExit(code)`. `Isolate::init` / `invoke` then report:
+
+| `code` | Result | Isolate state |
+|---|---|---|
+| 0 | `Ok` (no return values); `Isolate::exit_code()` is `Some(0)` | `Terminated` (a program that exited cannot be re-entered) |
+| non-zero | `Err(ExecError::Exit(code))`; `exit_code()` is `Some(code)` | `Failed` (only `terminate` is possible) |
+
+A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecError::Trap`, not an exit.
+
 ## 5. Guest exports
 
 | Export | Required | Meaning |
 |---|---|---|
 | `memory` | if a pointer-taking import is used | the guest's linear memory |
 | `_initialize` | no | called once when the instance is initialised (WASI reactor convention) |
+| `_start` | no | WASI command entry point; `orbit run` without `--invoke` calls it and exits with the guest's `proc_exit` code (0 if it returns) |
 | `orbit_init` | no | called once after `_initialize`; a trap or a non-zero `i32` result fails initialisation |
 | any function | — | invocable by name with integer arguments |
 | `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads (events, HTTP bodies) in a later version |
@@ -119,10 +169,12 @@ A module may carry a custom section `orbit.manifest` with UTF-8 JSON:
 At load the host:
 
 1. validates and compiles the module (Wasmtime; compiled code is cached per content hash);
-2. rejects every import whose module is not an `orbit:` capability the host knows at that major version
-   (this rejects `wasi_snapshot_preview1` and arbitrary `env` imports in milestone 1);
+2. rejects every import whose module is not a capability the host knows at that major version: an `orbit:` module, or
+   `wasi_snapshot_preview1` for the functions listed in section 4a (arbitrary `env` imports and any other WASI
+   function are rejected);
 3. rejects imports that are not functions (imported memories, tables and globals are not part of ABI v1);
-4. checks the import's signature against the capability's definition;
+4. checks the import's signature against the capability's definition, and that a wasm32-only capability (WASI) is not
+   imported by a module with a 64-bit memory;
 5. at instantiation, checks that the instance's grant includes every required capability — a denied capability
    fails instantiation (`capability not granted`); the module never runs.
 
