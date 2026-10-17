@@ -158,3 +158,74 @@ fn inspect_flags_invalid_modules() {
     assert!(!o.status.success());
     assert!(stdout(&o).contains("validation: FAILED"), "{}", stdout(&o));
 }
+
+#[test]
+fn run_clock_and_random_grants() {
+    let m = path("caps.wat");
+    let denied = orbit(&["run", &m, "--invoke", "fill"]);
+    assert!(!denied.status.success());
+    assert!(
+        stderr(&denied).contains("capability not granted"),
+        "{}",
+        stderr(&denied)
+    );
+
+    let grants = ["--grant", "clock/v1", "--grant", "random/v1"];
+    let run = |f: &str| {
+        let mut a = vec!["run", m.as_str()];
+        a.extend(grants);
+        a.extend(["--invoke", f]);
+        orbit(&a)
+    };
+    let o = run("fill");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "0");
+    let o = run("now_ms");
+    assert!(o.status.success(), "{}", stderr(&o));
+    // After 2020-01-01.
+    assert!(stdout(&o).trim().parse::<i64>().unwrap() > 1_577_836_800_000);
+    let o = run("mono");
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim().parse::<i64>().unwrap() % 1_000_000, 0);
+}
+
+#[test]
+fn run_kv_grant_and_namespaces() {
+    let m = path("kv.wat");
+    let o = orbit(&["run", &m, "--invoke", "roundtrip"]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("capability not granted: kv/v1"),
+        "{}",
+        stderr(&o)
+    );
+
+    // Granted but no namespace: open is denied (-2).
+    let o = orbit(&["run", &m, "--grant", "kv/v1", "--invoke", "roundtrip"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "-2");
+
+    let o = orbit(&[
+        "run",
+        &m,
+        "--grant",
+        "kv/v1",
+        "--kv-namespace",
+        "other",
+        "--kv-namespace",
+        "cache",
+        "--invoke",
+        "roundtrip",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "5");
+
+    // A namespace without the grant is a usage error.
+    let o = orbit(&["run", &m, "--kv-namespace", "cache"]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("--kv-namespace requires --grant kv/v1"),
+        "{}",
+        stderr(&o)
+    );
+}

@@ -696,6 +696,7 @@ dependencies = [
  "orbit-abi",
  "orbit-caps",
  "orbit-runtime",
+ "serde_json",
  "tokio",
 ]
 

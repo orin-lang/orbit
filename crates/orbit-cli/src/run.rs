@@ -4,7 +4,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use orbit_abi::CapabilityId;
-use orbit_caps::{LogCapability, StderrSink};
+use orbit_caps::{
+    ClockCapability, InMemoryKv, KvCapability, LogCapability, RandomCapability, StderrSink,
+};
 use orbit_runtime::{CapabilityRegistry, Grants, Limits, Runtime, RuntimeConfig};
 
 #[derive(Args)]
@@ -25,6 +27,9 @@ pub struct RunArgs {
     /// Grant a capability, e.g. `log/v1` (repeatable). Nothing is granted by default.
     #[arg(long = "grant", value_name = "CAP")]
     grants: Vec<String>,
+    /// KV namespace the module may open with `kv/v1` (repeatable).
+    #[arg(long = "kv-namespace", value_name = "NAME")]
+    kv_namespaces: Vec<String>,
     /// Maximum linear memory in bytes.
     #[arg(long, value_name = "BYTES")]
     max_memory: Option<u64>,
@@ -41,7 +46,11 @@ pub struct RunArgs {
 
 /// The capabilities this binary can serve.
 pub fn registry() -> CapabilityRegistry {
-    CapabilityRegistry::new().with(LogCapability::new(StderrSink))
+    CapabilityRegistry::new()
+        .with(LogCapability::new(StderrSink))
+        .with(ClockCapability::system())
+        .with(RandomCapability::new())
+        .with(KvCapability::new(InMemoryKv::new()))
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
@@ -54,7 +63,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 orbit_abi::ABI_VERSION
             );
         }
-        grants = grants.grant(id);
+        grants = if id == CapabilityId::kv_v1() {
+            grants.grant_with(id, serde_json::json!({ "namespaces": args.kv_namespaces }))
+        } else {
+            grants.grant(id)
+        };
+    }
+    if !args.kv_namespaces.is_empty() && !grants.contains(&CapabilityId::kv_v1()) {
+        bail!("--kv-namespace requires --grant kv/v1");
     }
     let mut limits = Limits::default();
     if let Some(m) = args.max_memory {
