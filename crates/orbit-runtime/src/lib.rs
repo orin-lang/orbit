@@ -22,6 +22,7 @@ mod artifact;
 mod capability;
 mod engine;
 mod error;
+mod handles;
 mod host;
 mod isolate;
 mod lifecycle;
@@ -32,6 +33,7 @@ pub use artifact::{Artifact, ContentHash, ExportInfo, ImportInfo, ModuleInfo, ha
 pub use capability::{Capability, CapabilityRegistry, Grants, InstanceId, InstanceInfo, TenantId};
 pub use engine::{EngineConfig, OrbitEngine, PoolingConfig};
 pub use error::{AdmissionError, EngineError, ExecError, InstantiateError, LoadError};
+pub use handles::{HandleTable, MAX_HANDLES, TableFull};
 pub use host::{HostMetrics, HostState, read_guest_bytes, write_guest_bytes};
 pub use isolate::{InvocationMetrics, Isolate, IsolateMetrics};
 pub use lifecycle::{IsolateState, TransitionError};
