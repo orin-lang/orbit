@@ -1,0 +1,21 @@
+[package]
+name = "orbit-caps"
+description = "Orbit capability implementations (log, clock, random, kv)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbit-abi.workspace = true
+orbit-runtime.workspace = true
+wasmtime.workspace = true
+serde_json.workspace = true
+getrandom = "0.3"
+
+[dev-dependencies]
+tokio.workspace = true
+wat.workspace = true
+
+[lints]
+workspace = true

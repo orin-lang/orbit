@@ -1,0 +1,11 @@
+(module
+  (@custom "orbit.manifest" "{\"abi\":1,\"requires\":[\"log/v1\"],\"producer\":\"fixture\"}")
+  (import "orbit:log/v1" "write" (func $write (param i32 i64 i64) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 16) "hello from guest")
+  (func (export "hello") (result i32)
+    (call $write (i32.const 2) (i64.const 16) (i64.const 16)))
+  (func (export "add") (param i32 i32) (result i32)
+    (i32.add (local.get 0) (local.get 1)))
+  (func (export "spin")
+    (loop $l (br $l))))

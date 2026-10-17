@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/orbit-abi", "crates/orbit-runtime", "crates/orbit-caps", "crates/orbit-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+orbit-abi = { path = "crates/orbit-abi" }
+orbit-runtime = { path = "crates/orbit-runtime" }
+orbit-caps = { path = "crates/orbit-caps" }
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "async", "pooling-allocator", "runtime", "wat", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+wat = "1"
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }

@@ -1,0 +1,29 @@
+[package]
+name = "orbit-runtime"
+description = "Orbit isolate runtime: engine, artifacts, isolates, limits, admission control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+orbit-abi.workspace = true
+wasmtime.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+wasmparser = { version = "0.258", default-features = false, features = ["std", "validate"] }
+wat.workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+orbit-caps.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[[bench]]
+name = "runtime"
+harness = false
+
+[lints]
+workspace = true
