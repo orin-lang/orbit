@@ -66,6 +66,9 @@ pub struct InstanceInfo {
     pub tenant: TenantId,
     /// Per-invocation log byte budget from the isolate's [`Limits`](crate::Limits).
     pub max_log_bytes: u64,
+    /// All capabilities granted to this isolate, with their configuration. A capability that
+    /// depends on another grant (the WASI shim's clock and random functions) reads it here.
+    pub grants: Grants,
 }
 
 /// A host capability: a set of functions in one `orbit:<name>/v<major>` import module.
@@ -95,6 +98,11 @@ pub trait Capability: Send + Sync + 'static {
     /// Called before every invocation (including initialisation); reset per-invocation
     /// budgets here.
     fn begin_invocation(&self, _state: &mut (dyn Any + Send)) {}
+
+    /// Called after every invocation (including initialisation), whether it returned,
+    /// trapped or exited; flush buffered output here. Not called when the isolate could not
+    /// start running.
+    fn end_invocation(&self, _state: &mut (dyn Any + Send)) {}
 }
 
 /// The capabilities a host implements.

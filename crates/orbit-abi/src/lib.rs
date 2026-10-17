@@ -25,6 +25,9 @@ pub const ABI_VERSION: u32 = 1;
 /// Prefix of every capability import module name.
 pub const IMPORT_PREFIX: &str = "orbit:";
 
+/// Import module name of the restricted WASI preview 1 shim (capability `wasi_p1/v1`).
+pub const WASI_P1_IMPORT_MODULE: &str = "wasi_snapshot_preview1";
+
 /// Name of the export a guest must provide for pointer-taking imports.
 pub const MEMORY_EXPORT: &str = "memory";
 /// Optional export called once when an instance is initialised (WASI reactor convention).
@@ -40,6 +43,13 @@ pub mod limits {
     pub const LOG_DEFAULT_BUDGET_BYTES: u64 = 1024 * 1024;
     /// Maximum bytes of one `orbit:random/v1` `fill` call.
     pub const RANDOM_MAX_FILL_BYTES: u64 = 64 * 1024;
+    /// Maximum bytes of one WASI `random_get` call.
+    pub const WASI_RANDOM_MAX_BYTES: u64 = RANDOM_MAX_FILL_BYTES;
+    /// Maximum bytes of one WASI `fd_write` call that the host accepts (a larger write is
+    /// partial, as POSIX allows).
+    pub const WASI_WRITE_MAX_BYTES: u64 = 1024 * 1024;
+    /// Maximum number of iovecs in one WASI `fd_write`/`fd_read` call.
+    pub const WASI_MAX_IOVS: u32 = 1024;
     /// Maximum KV key size.
     pub const KV_MAX_KEY_BYTES: u64 = 1024;
     /// Maximum KV value size.

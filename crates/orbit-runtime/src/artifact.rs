@@ -198,6 +198,10 @@ impl Artifact {
             .exports()
             .any(|e| e.name() == MEMORY_EXPORT && matches!(e.ty(), ExternType::Memory(_)));
 
+        let memory64 = module.exports().any(|e| {
+            e.name() == MEMORY_EXPORT && matches!(e.ty(), ExternType::Memory(m) if m.is_64())
+        });
+
         let mut imported = BTreeSet::new();
         for import in module.imports() {
             let unknown = || LoadError::UnknownImport {
@@ -227,6 +231,12 @@ impl Artifact {
             }
             if expected.uses_memory && !has_memory_export {
                 return Err(LoadError::MissingMemoryExport {
+                    module: import.module().to_owned(),
+                    name: import.name().to_owned(),
+                });
+            }
+            if spec.wasm32_only && memory64 {
+                return Err(LoadError::Memory64Unsupported {
                     module: import.module().to_owned(),
                     name: import.name().to_owned(),
                 });
