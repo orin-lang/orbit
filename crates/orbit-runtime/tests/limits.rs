@@ -241,3 +241,36 @@ async fn pooling_allocator_enforces_the_same_limits() {
         i.terminate();
     }
 }
+
+#[tokio::test]
+async fn instantiation_without_start_function_uses_no_fuel() {
+    let (rt, _) = runtime();
+    let variants = [
+        (
+            "plain",
+            r#"(module (memory (export "memory") 1) (func (export "f")))"#,
+        ),
+        (
+            "data",
+            r#"(module (memory (export "memory") 1) (data (i32.const 16) "hello from guest") (func (export "f")))"#,
+        ),
+        (
+            "custom",
+            r#"(module (@custom "orbit.manifest" "{\"abi\":1,\"requires\":[]}") (memory (export "memory") 1) (func (export "f")))"#,
+        ),
+    ];
+    for (name, wat) in variants {
+        let art = load(&rt, wat);
+        let iso = rt
+            .spawn_isolate(
+                &art,
+                "t",
+                &Grants::none(),
+                Limits::default().with_fuel(1_000_000),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let used = iso.metrics().fuel_consumed;
+        assert_eq!(used, 0, "{name}: instantiation consumed {used} fuel");
+    }
+}
