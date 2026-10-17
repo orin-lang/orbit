@@ -85,7 +85,9 @@ delete(h: i64, key_ptr: i64, key_len: i64) -> i32
 close(h: i64) -> i32
 ```
 
-Keys at most 1 KiB, values at most 1 MiB. The namespaces an instance may open are part of its grant; the storage of a
+Keys are 1 byte to 1 KiB (an empty key is `ERR_INVALID`), values at most 1 MiB. `delete` of an absent key returns
+`OK` (idempotent). At most 64 handles are open per instance (`ERR_QUOTA`). A handle is checked before any buffer, so a bad
+handle reports `ERR_BAD_HANDLE` even when a buffer is also invalid. The namespaces an instance may open are part of its grant; the storage of a
 namespace is scoped by tenant, so two tenants opening `"cache"` never see each other's keys.
 
 ## 5. Guest exports

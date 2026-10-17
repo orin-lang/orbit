@@ -1,0 +1,15 @@
+(module
+  (import "orbit:kv/v1" "open" (func $open (param i64 i64) (result i64)))
+  (import "orbit:kv/v1" "get" (func $get (param i64 i64 i64 i64 i64) (result i64)))
+  (import "orbit:kv/v1" "put" (func $put (param i64 i64 i64 i64 i64) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "cache")
+  (data (i32.const 16) "k")
+  (data (i32.const 24) "value")
+  ;; Opens `cache`, stores k=value and returns the stored length (or a negative status).
+  (func (export "roundtrip") (result i64)
+    (local $h i64)
+    (local.set $h (call $open (i64.const 0) (i64.const 5)))
+    (if (i64.lt_s (local.get $h) (i64.const 0)) (then (return (local.get $h))))
+    (drop (call $put (local.get $h) (i64.const 16) (i64.const 1) (i64.const 24) (i64.const 5)))
+    (call $get (local.get $h) (i64.const 16) (i64.const 1) (i64.const 64) (i64.const 64))))
