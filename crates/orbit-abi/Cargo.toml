@@ -1,0 +1,15 @@
+[package]
+name = "orbit-abi"
+description = "Orbit host ABI definitions: status codes, capability ids, signatures, manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
