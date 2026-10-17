@@ -6,8 +6,9 @@ use clap::Args;
 use orbit_abi::CapabilityId;
 use orbit_caps::{
     ClockCapability, InMemoryKv, KvCapability, LogCapability, RandomCapability, StderrSink,
+    WasiCapability,
 };
-use orbit_runtime::{CapabilityRegistry, Grants, Limits, Runtime, RuntimeConfig};
+use orbit_runtime::{CapabilityRegistry, ExecError, Grants, Limits, Runtime, RuntimeConfig};
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -30,6 +31,13 @@ pub struct RunArgs {
     /// KV namespace the module may open with `kv/v1` (repeatable).
     #[arg(long = "kv-namespace", value_name = "NAME")]
     kv_namespaces: Vec<String>,
+    /// Argument for a module granted `wasi_p1/v1`, after argv[0] (`main`); repeatable.
+    #[arg(long = "wasi-arg", value_name = "ARG", allow_hyphen_values = true)]
+    wasi_args: Vec<String>,
+    /// Environment variable `K=V` for a module granted `wasi_p1/v1`; repeatable. The host's
+    /// own environment is never passed.
+    #[arg(long = "wasi-env", value_name = "K=V")]
+    wasi_env: Vec<String>,
     /// Maximum linear memory in bytes.
     #[arg(long, value_name = "BYTES")]
     max_memory: Option<u64>,
@@ -46,14 +54,33 @@ pub struct RunArgs {
 
 /// The capabilities this binary can serve.
 pub fn registry() -> CapabilityRegistry {
+    let clock = ClockCapability::system();
+    // WASI clocks read the same source as `orbit:clock/v1`; guest stdout/stderr go to stderr.
+    let wasi = WasiCapability::new(StderrSink).with_clock(&clock);
     CapabilityRegistry::new()
         .with(LogCapability::new(StderrSink))
-        .with(ClockCapability::system())
+        .with(clock)
         .with(RandomCapability::new())
         .with(KvCapability::new(InMemoryKv::new()))
+        .with(wasi)
 }
 
-pub async fn run(args: RunArgs) -> Result<()> {
+fn wasi_config(args: &RunArgs) -> Result<serde_json::Value> {
+    let mut argv = vec!["main".to_owned()];
+    argv.extend(args.wasi_args.iter().cloned());
+    let mut env = serde_json::Map::new();
+    for kv in &args.wasi_env {
+        let (k, v) = kv
+            .split_once('=')
+            .filter(|(k, _)| !k.is_empty())
+            .with_context(|| format!("bad --wasi-env `{kv}`: expected K=V"))?;
+        env.insert(k.to_owned(), serde_json::Value::String(v.to_owned()));
+    }
+    Ok(serde_json::json!({ "args": argv, "env": env }))
+}
+
+/// Runs the module; returns the process exit code (the guest's `proc_exit` code, else 0).
+pub async fn run(args: RunArgs) -> Result<i32> {
     let mut grants = Grants::none();
     for g in &args.grants {
         let id: CapabilityId = g.parse().with_context(|| format!("bad --grant `{g}`"))?;
@@ -65,9 +92,15 @@ pub async fn run(args: RunArgs) -> Result<()> {
         }
         grants = if id == CapabilityId::kv_v1() {
             grants.grant_with(id, serde_json::json!({ "namespaces": args.kv_namespaces }))
+        } else if id == CapabilityId::wasi_p1_v1() {
+            grants.grant_with(id, wasi_config(&args)?)
         } else {
             grants.grant(id)
         };
+    }
+    let wasi_flags = !args.wasi_args.is_empty() || !args.wasi_env.is_empty();
+    if wasi_flags && !grants.contains(&CapabilityId::wasi_p1_v1()) {
+        bail!("--wasi-arg/--wasi-env require --grant wasi_p1/v1");
     }
     if !args.kv_namespaces.is_empty() && !grants.contains(&CapabilityId::kv_v1()) {
         bail!("--kv-namespace requires --grant kv/v1");
@@ -87,17 +120,42 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .spawn_isolate(&artifact, args.tenant.as_str(), &grants, limits)
         .await
         .context("instantiate failed")?;
-    isolate.init().await.context("initialisation failed")?;
-
-    if let Some(name) = &args.invoke {
-        let results = isolate
-            .invoke(name, &args.args)
-            .await
-            .with_context(|| format!("`{name}` failed"))?;
-        for r in results {
-            println!("{r}");
-        }
-    }
+    let has_start = artifact
+        .info()
+        .exports
+        .iter()
+        .any(|e| e.name == "_start" && e.kind == "func");
+    let code = drive(&mut isolate, &args, has_start).await?;
     isolate.terminate();
-    Ok(())
+    Ok(code)
+}
+
+/// Initialises the isolate and runs `--invoke NAME`, or `_start` of a command module.
+async fn drive(
+    isolate: &mut orbit_runtime::Isolate,
+    args: &RunArgs,
+    has_start: bool,
+) -> Result<i32> {
+    match isolate.init().await {
+        Ok(()) => {}
+        Err(ExecError::Exit(code)) => return Ok(code),
+        Err(e) => return Err(e).context("initialisation failed"),
+    }
+    if let Some(code) = isolate.exit_code() {
+        return Ok(code);
+    }
+    let entry = args.invoke.as_deref().unwrap_or("_start");
+    if args.invoke.is_none() && !has_start {
+        return Ok(0);
+    }
+    match isolate.invoke(entry, &args.args).await {
+        Ok(results) => {
+            for r in results {
+                println!("{r}");
+            }
+            Ok(isolate.exit_code().unwrap_or(0))
+        }
+        Err(ExecError::Exit(code)) => Ok(code),
+        Err(e) => Err(e).with_context(|| format!("`{entry}` failed")),
+    }
 }

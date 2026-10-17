@@ -120,6 +120,13 @@ impl ClockCapability {
         Self::new(SystemTimeSource::new())
     }
 
+    /// The time source this capability reads. `wasi_p1/v1` shares it so that WASI clocks
+    /// and `orbit:clock/v1` agree (and a test's [`ManualClock`] drives both).
+    #[must_use]
+    pub fn time_source(&self) -> Arc<dyn TimeSource> {
+        Arc::clone(&self.source)
+    }
+
     /// A clock capability reading `source`.
     #[must_use]
     pub fn new(source: impl TimeSource) -> Self {
@@ -135,18 +142,18 @@ impl fmt::Debug for ClockCapability {
     }
 }
 
-fn parse_resolution(config: &serde_json::Value) -> u64 {
+pub(crate) fn parse_resolution(config: &serde_json::Value) -> u64 {
     config
         .get("resolution_ns")
         .and_then(serde_json::Value::as_u64)
         .map_or(DEFAULT_RESOLUTION_NS, |r| r.max(1))
 }
 
-fn coarsen_u(v: u64, res: u64) -> u64 {
+pub(crate) fn coarsen_u(v: u64, res: u64) -> u64 {
     v - v % res
 }
 
-fn coarsen_i(v: i64, res: u64) -> i64 {
+pub(crate) fn coarsen_i(v: i64, res: u64) -> i64 {
     let res = i64::try_from(res).unwrap_or(i64::MAX);
     v - v.rem_euclid(res)
 }
