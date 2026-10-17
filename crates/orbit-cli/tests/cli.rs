@@ -390,3 +390,62 @@ fn inspect_shows_the_wasi_capability() {
         stdout(&o)
     );
 }
+
+fn code(o: &Output) -> i32 {
+    o.status.code().expect("exited normally")
+}
+
+#[test]
+fn run_calls_orin_main_and_exits_with_its_result() {
+    let o = orbit(&["run", &path("orin_exit0.wat")]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "",
+        "orin_main's result is the exit status, not output"
+    );
+    let o = orbit(&["run", &path("orin_exit7.wat")]);
+    assert_eq!(code(&o), 7, "{}", stderr(&o));
+    // 256 would wrap to success; it is clamped to 1 like proc_exit codes.
+    let o = orbit(&["run", &path("orin_exit256.wat")]);
+    assert_eq!(code(&o), 1, "{}", stderr(&o));
+}
+
+#[test]
+fn orin_trap_uses_exit_status_export_and_prints_the_trap() {
+    let o = orbit(&["run", &path("orin_trap5.wat")]);
+    assert_eq!(code(&o), 5);
+    assert!(stderr(&o).contains("orin_main"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("trap"), "{}", stderr(&o));
+}
+
+#[test]
+fn orin_genuine_trap_exits_1_with_the_original_trap() {
+    for name in [
+        "orin_trap_m1.wat",
+        "orin_trap_noexport.wat",
+        "orin_trap_status_traps.wat",
+    ] {
+        let o = orbit(&["run", &path(name)]);
+        assert_eq!(code(&o), 1, "{name}: {}", stderr(&o));
+        assert!(
+            stderr(&o).contains("`orin_main` failed"),
+            "{name}: {}",
+            stderr(&o)
+        );
+        assert!(stderr(&o).contains("trap"), "{name}: {}", stderr(&o));
+    }
+}
+
+#[test]
+fn explicit_invoke_wins_over_orin_main() {
+    let o = orbit(&["run", &path("orin_exit7.wat"), "--invoke", "orin_main"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "7");
+}
+
+#[test]
+fn fuel_flag_enables_metering_and_still_runs_orin_main() {
+    let o = orbit(&["run", &path("orin_exit7.wat"), "--fuel", "1000000"]);
+    assert_eq!(code(&o), 7, "{}", stderr(&o));
+}
