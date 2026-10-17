@@ -226,9 +226,14 @@ async fn rust_guest_is_bounded_by_fuel() {
     )
     .unwrap();
     let art = rt.load(&fixture("wasi_hello.wasm")).unwrap();
-    let grants = Grants::none().grant(CapabilityId::wasi_p1_v1());
+    let grants = Grants::none().grant_with(
+        CapabilityId::wasi_p1_v1(),
+        json!({"args": ["main", "spin"]}),
+    );
+    // Well above what instantiation can cost on any platform (data segments are charged
+    // without a copy-on-write image), far below what the endless loop needs.
     let mut iso = rt
-        .spawn_isolate(&art, "t", &grants, Limits::default().with_fuel(1_000))
+        .spawn_isolate(&art, "t", &grants, Limits::default().with_fuel(20_000_000))
         .await
         .unwrap();
     iso.init().await.unwrap();

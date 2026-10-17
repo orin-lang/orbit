@@ -40,6 +40,13 @@ fn main() {
             println!("stdin_bytes={n}");
         }
         Some("panic") => panic!("boom"),
+        Some("spin") => {
+            // Runaway computation: only a fuel or deadline limit stops it.
+            let mut x: u64 = 0;
+            loop {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+        }
         Some(other) => println!("unknown mode {other}"),
     }
     println!("done");
