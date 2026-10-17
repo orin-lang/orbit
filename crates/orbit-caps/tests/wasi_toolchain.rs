@@ -220,8 +220,10 @@ async fn rust_stdin_is_empty_and_panics_are_controlled() {
 #[tokio::test]
 async fn rust_guest_is_bounded_by_fuel() {
     let sink = MemorySink::new();
+    let mut config = RuntimeConfig::default();
+    config.engine.fuel_metering = true;
     let rt = Runtime::new(
-        RuntimeConfig::default(),
+        config,
         CapabilityRegistry::new().with(WasiCapability::new(sink)),
     )
     .unwrap();

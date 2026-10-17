@@ -2,6 +2,8 @@ use std::time::Duration;
 
 /// Resource limits of one isolate.
 ///
+/// Without fuel metering the wall-clock `timeout` is the only CPU bound; set it for untrusted code.
+///
 /// `fuel` and `timeout` apply to **each** invocation (including initialisation); the
 /// memory and table limits apply to the isolate for its whole life.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,7 +13,10 @@ pub struct Limits {
     pub max_memory_bytes: u64,
     /// Maximum number of elements of any table.
     pub max_table_elements: u32,
-    /// Fuel per invocation; `None` means unmetered (fuel is still *measured*).
+    /// Fuel per invocation; `None` means no fuel limit. `Some(_)` requires a runtime built
+    /// with `EngineConfig::fuel_metering`; otherwise spawning fails with
+    /// `InstantiateError::FuelMeteringDisabled`. On a metered engine consumption is measured
+    /// even when this is `None`.
     pub fuel: Option<u64>,
     /// Wall-clock budget per invocation; `None` means no deadline. Enforced with epoch
     /// interruption, so its resolution is the engine's tick (10 ms by default).

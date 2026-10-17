@@ -2,6 +2,8 @@
 
 Status: accepted (2026-10-17)
 
+Superseded in part by [ADR-0008](0008-fuel-metering-is-opt-in.md): fuel metering is now opt-in; the epoch time slices below are unchanged.
+
 ## Context
 Thousands of deployed applications share few cores. Many are idle; active ones mix computation and I/O.
 

@@ -19,7 +19,7 @@ const WORK: &str = r#"
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_hundred_isolates_share_a_small_slot_pool() {
-    let (rt, _) = runtime_with(RuntimeConfig {
+    let (rt, _) = runtime_metered_with(RuntimeConfig {
         max_concurrent_invocations: 4,
         memory_budget_bytes: 200 * 1024 * 1024,
         ..RuntimeConfig::default()

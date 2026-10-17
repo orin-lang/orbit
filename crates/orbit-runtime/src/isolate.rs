@@ -20,8 +20,10 @@ use crate::runtime::MemoryReservation;
 /// Measurements of one finished invocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InvocationMetrics {
-    /// Fuel consumed (measured: difference of `Store::get_fuel` before and after).
-    pub fuel_consumed: u64,
+    /// Fuel consumed (measured: difference of `Store::get_fuel` before and after), or `None`
+    /// when the engine has no fuel metering (`EngineConfig::fuel_metering == false`): fuel is
+    /// then *not measured*, which is different from "measured as 0".
+    pub fuel_consumed: Option<u64>,
     /// Wall-clock time from acquiring the run slot to the guest returning or trapping
     /// (measured with `Instant`; includes time spent yielded to the executor).
     pub wall_time: Duration,
@@ -30,13 +32,15 @@ pub struct InvocationMetrics {
 /// Snapshot of an isolate's metrics.
 ///
 /// Measured values come straight from Wasmtime or the host; there are no estimates in this
-/// struct. `fuel_consumed` is Wasmtime's own instruction-based fuel, not CPU time.
+/// struct. `fuel_consumed` is Wasmtime's own instruction-based fuel, not CPU time, and is only
+/// available when the engine was built with `EngineConfig::fuel_metering`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IsolateMetrics {
     /// Lifecycle state.
     pub state: IsolateState,
-    /// Total fuel consumed over the isolate's life (measured).
-    pub fuel_consumed: u64,
+    /// Total fuel consumed over the isolate's life (measured), or `None` when fuel metering
+    /// is disabled in the engine (not measured; never reported as 0).
+    pub fuel_consumed: Option<u64>,
     /// Metrics of the most recent finished invocation or initialisation (measured).
     pub last_invocation: Option<InvocationMetrics>,
     /// Number of finished invocations, not counting initialisation (exact).
@@ -69,6 +73,8 @@ pub(crate) struct SpawnParams {
 }
 
 const UNMETERED: u64 = u64::MAX;
+const POST_MORTEM_FUEL: u64 = 100_000;
+const POST_MORTEM_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// One running instance of an [`Artifact`].
 ///
@@ -83,6 +89,7 @@ pub struct Isolate {
     memory: Option<Memory>,
     caps: Vec<Arc<dyn Capability>>,
     limits: Limits,
+    metered: bool,
     semaphore: Arc<Semaphore>,
     reservation: Option<MemoryReservation>,
     failure: Option<ExecError>,
@@ -109,6 +116,10 @@ impl Isolate {
             semaphore,
             reservation,
         } = params;
+        let metered = engine.fuel_metering();
+        if limits.fuel.is_some() && !metered {
+            return Err(InstantiateError::FuelMeteringDisabled);
+        }
         let started = Instant::now();
         let info = InstanceInfo {
             instance_id: id,
@@ -134,23 +145,32 @@ impl Isolate {
                 _ => Ok(UpdateDeadline::Yield(1)),
             }
         });
-        arm(&mut store, &limits).map_err(|e| InstantiateError::Instantiate(format!("{e:#}")))?;
+        arm(&mut store, &limits, metered)
+            .map_err(|e| InstantiateError::Instantiate(format!("{e:#}")))?;
 
         let instantiated = artifact.pre().instantiate_async(&mut store).await;
-        let fuel_used = limits
-            .fuel
-            .unwrap_or(UNMETERED)
-            .saturating_sub(store.get_fuel().unwrap_or(0));
+        let fuel_used = if metered {
+            limits
+                .fuel
+                .unwrap_or(UNMETERED)
+                .saturating_sub(store.get_fuel().unwrap_or(0))
+        } else {
+            0
+        };
         store.data_mut().deadline = None;
         let instance = match instantiated {
             Ok(i) => i,
             Err(e) => {
-                let e = e.context(format!(
-                    "instantiation used {fuel_used} fuel of {}",
-                    limits
-                        .fuel
-                        .map_or_else(|| "unmetered".to_owned(), |f| f.to_string())
-                ));
+                let e = if metered {
+                    e.context(format!(
+                        "instantiation used {fuel_used} fuel of {}",
+                        limits
+                            .fuel
+                            .map_or_else(|| "unlimited".to_owned(), |f| f.to_string())
+                    ))
+                } else {
+                    e
+                };
                 let lim = &store.data().limiter;
                 return Err(if lim.memory_grow_denied + lim.table_grow_denied > 0 {
                     InstantiateError::ResourceLimit(format!("{e:#}"))
@@ -170,6 +190,7 @@ impl Isolate {
             instance: Some(instance),
             caps: artifact.linked().to_vec(),
             limits,
+            metered,
             semaphore,
             reservation: Some(reservation),
             failure: None,
@@ -377,6 +398,79 @@ impl Isolate {
         Ok(values)
     }
 
+    /// Reads the program's exit status from a guest export after a trap.
+    ///
+    /// Some guests (for example Orin programs, see `docs/host-abi.md` section 5) record the
+    /// exit status the program chose before it trapped, and expose it through an export
+    /// `() -> i32`. This is the only way to run guest code in [`IsolateState::Failed`], and it
+    /// is deliberately narrow:
+    ///
+    /// * allowed only when the isolate is `Failed` because of [`ExecError::Trap`]. A fuel,
+    ///   deadline, memory-limit, `proc_exit` or `orbit_init` failure returns `None`: the
+    ///   guest state is not trustworthy or the limits were already hit;
+    /// * the export must have exactly the type `() -> i32`; otherwise `None`;
+    /// * it runs under its own small budget (100 000 fuel on a metered engine, and a deadline
+    ///   of the invocation timeout capped at 250 ms), holding a run slot like any invocation;
+    /// * it does not reset per-invocation capability budgets (the log budget stays spent), does
+    ///   not count as an invocation and **never changes the state**: the isolate stays
+    ///   `Failed` and [`failure`](Self::failure) keeps the original trap, also when this call
+    ///   itself traps (that returns `None`).
+    ///
+    /// Returns `Some(status)` on success.
+    pub async fn post_mortem_i32(&mut self, export: &str) -> Option<i32> {
+        if self.state() != IsolateState::Failed || !matches!(self.failure, Some(ExecError::Trap(_)))
+        {
+            return None;
+        }
+        let func = {
+            let store = self.store.as_mut()?;
+            let func = self.instance?.get_func(&mut *store, export)?;
+            let ty = func.ty(&*store);
+            if ty.params().len() != 0
+                || ty.results().len() != 1
+                || !ty.results().all(|r| matches!(r, ValType::I32))
+            {
+                return None;
+            }
+            func
+        };
+        let permit = Arc::clone(&self.semaphore).acquire_owned().await.ok()?;
+        let timeout = self
+            .limits
+            .timeout
+            .map_or(POST_MORTEM_TIMEOUT, |t| t.min(POST_MORTEM_TIMEOUT));
+        let armed = arm_with(
+            self.store.as_mut()?,
+            Some(POST_MORTEM_FUEL),
+            Some(timeout),
+            self.metered,
+        );
+        let result = if armed.is_ok() {
+            self.call(func, &[]).await.ok()
+        } else {
+            None
+        };
+        drop(permit);
+        let fuel_left = self.fuel_now();
+        if let Some(store) = self.store.as_mut() {
+            store.data_mut().deadline = None;
+            for cap in &self.caps {
+                if let Some(s) = store.data_mut().cap_state_dyn(&cap.id()) {
+                    cap.end_invocation(s);
+                }
+            }
+        }
+        if self.metered {
+            self.fuel_total = self
+                .fuel_total
+                .saturating_add(POST_MORTEM_FUEL.saturating_sub(fuel_left));
+        }
+        match result?.first() {
+            Some(Val::I32(v)) => Some(*v),
+            _ => None,
+        }
+    }
+
     /// Stops the isolate and frees everything it owns: the store (so its linear memory,
     /// tables and handles), the per-capability state and the memory admission reservation.
     /// Idempotent.
@@ -410,7 +504,7 @@ impl Isolate {
         let mem_export = self.memory.map(|m| m.data_size(store) as u64);
         IsolateMetrics {
             state: self.state(),
-            fuel_consumed: self.fuel_total,
+            fuel_consumed: self.metered.then_some(self.fuel_total),
             last_invocation: self.last,
             invocations: self.invocations,
             instantiation_latency: self.instantiation_latency,
@@ -431,6 +525,9 @@ impl Isolate {
     }
 
     fn fuel_now(&self) -> u64 {
+        if !self.metered {
+            return 0;
+        }
         self.store
             .as_ref()
             .and_then(|s| s.get_fuel().ok())
@@ -460,7 +557,7 @@ impl Isolate {
                 cap.begin_invocation(s);
             }
         }
-        if let Err(e) = arm(store, &self.limits) {
+        if let Err(e) = arm(store, &self.limits, self.metered) {
             let e = ExecError::Trap(format!("{e:#}"));
             self.fail(e.clone());
             return Err(e);
@@ -508,7 +605,7 @@ impl Isolate {
         let consumed = fuel_before.saturating_sub(self.fuel_now());
         self.fuel_total = self.fuel_total.saturating_add(consumed);
         self.last = Some(InvocationMetrics {
-            fuel_consumed: consumed,
+            fuel_consumed: self.metered.then_some(consumed),
             wall_time: start.elapsed(),
         });
         if let Some(store) = self.store.as_mut() {
@@ -547,10 +644,22 @@ impl Isolate {
     }
 }
 
-/// Sets fuel and the absolute deadline for the next stretch of guest execution.
-fn arm(store: &mut Store<HostState>, limits: &Limits) -> wasmtime::Result<()> {
-    store.set_fuel(limits.fuel.unwrap_or(UNMETERED))?;
-    store.data_mut().deadline = limits.timeout.map(|t| Instant::now() + t);
+/// Sets fuel (only on a metered engine) and the absolute deadline for the next stretch of guest
+/// execution.
+fn arm(store: &mut Store<HostState>, limits: &Limits, metered: bool) -> wasmtime::Result<()> {
+    arm_with(store, limits.fuel, limits.timeout, metered)
+}
+
+fn arm_with(
+    store: &mut Store<HostState>,
+    fuel: Option<u64>,
+    timeout: Option<Duration>,
+    metered: bool,
+) -> wasmtime::Result<()> {
+    if metered {
+        store.set_fuel(fuel.unwrap_or(UNMETERED))?;
+    }
+    store.data_mut().deadline = timeout.map(|t| Instant::now() + t);
     store.set_epoch_deadline(1);
     Ok(())
 }

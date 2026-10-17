@@ -121,6 +121,12 @@ pub enum InstantiateError {
     /// The module's declared memory or tables exceed the isolate's limits.
     #[error("resource limit exceeded at instantiation: {0}")]
     ResourceLimit(String),
+    /// `Limits::fuel` is set but the runtime's engine was built without fuel metering
+    /// (`EngineConfig::fuel_metering = false`). A fuel budget is never silently ignored.
+    #[error(
+        "Limits::fuel is set but fuel metering is disabled in this runtime (EngineConfig::fuel_metering)"
+    )]
+    FuelMeteringDisabled,
     /// Instantiation failed for another reason (for example the start function trapped).
     #[error("instantiation failed: {0}")]
     Instantiate(String),

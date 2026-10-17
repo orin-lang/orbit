@@ -12,7 +12,7 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 | WASI has no hidden authority | stdout/stderr go to the log sink under the log budget; stdin is empty; no preopens; argv/env only from the grant; clock and random answer `ENOTCAPABLE` unless `clock/v1` / `random/v1` are also granted | `crates/orbit-caps/tests/wasi.rs`, `wasi_toolchain.rs` |
 | host input validation | every guest `(ptr, len)` is checked against the current memory size with overflow-checked `u64` arithmetic | out-of-bounds / overflow / invalid UTF-8 tests (wasm32 and wasm64) |
 | bounded memory | `ResourceLimiter` caps linear memory and tables; admission control caps the sum | memory-growth tests |
-| bounded CPU | fuel per invocation; epoch-based wall-clock deadline | runaway-loop tests |
+| bounded CPU | wall-clock deadline (`Limits::timeout`, epoch based); with `EngineConfig::fuel_metering` also fuel per invocation. **Without metering and without a timeout nothing bounds a runaway guest**: always set a timeout in multi-tenant use ([ADR-0008](adr/0008-fuel-metering-is-opt-in.md)) | runaway-loop tests (`limits.rs`, `metering.rs`) |
 | handle ownership | per-instance handle tables with generations | KV handle tests |
 | tenant separation in shared adapters | adapters are keyed by tenant chosen by the host, never by the guest | KV tenant tests |
 | cleanup | a trapped isolate is `Failed`, refuses work, and its store is dropped on terminate | cleanup tests |
@@ -31,13 +31,15 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 
 ## Known limitations
 
-* No CPU-time accounting; fuel approximates instruction count, not time.
+* No CPU-time accounting; fuel (opt-in) approximates instruction count, not time. Without fuel metering the CPU bound is
+  the epoch deadline: wall-clock, tick-granular (10 ms by default) and not deterministic. The `orbit run` CLI sets no
+  timeout by default, so a runaway guest runs until killed unless `--timeout-ms` or `--fuel` is given.
 * Host-side memory used by adapters (KV contents, log buffers) is not charged to the isolate yet; the in-memory KV has
   only per-call size limits.
 * The clock has 1 ms resolution by default but no deliberate jitter; timing side channels are not mitigated.
 * No process-level sandboxing, seccomp or cgroups yet. The architecture keeps a "one Orbit process per trust domain"
   deployment possible: nothing assumes all tenants share a process.
-* Instantiation runs under the invocation fuel budget. Where Wasmtime has no copy-on-write memory image (seen on
+* On a metered engine, instantiation runs under the invocation fuel budget. Where Wasmtime has no copy-on-write memory image (seen on
   Windows and macOS CI runners), it charges fuel for data-segment initialisation, roughly one unit per byte of the host
   pages touched (4097 for one 4 KiB page). Very small fuel budgets can therefore fail at instantiation on some
   platforms and not on others.

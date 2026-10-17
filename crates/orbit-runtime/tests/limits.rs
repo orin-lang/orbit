@@ -16,7 +16,7 @@ const MEM: &str = r#"
 
 #[tokio::test]
 async fn fuel_exhaustion_is_out_of_fuel_and_measured() {
-    let (rt, _) = runtime();
+    let (rt, _) = runtime_metered();
     let art = load(&rt, SPIN);
     let mut iso = rt
         .spawn_isolate(
@@ -32,13 +32,14 @@ async fn fuel_exhaustion_is_out_of_fuel_and_measured() {
     assert_eq!(iso.state(), IsolateState::Failed);
     assert_eq!(iso.failure(), Some(&ExecError::OutOfFuel));
     let m = iso.metrics();
-    assert!(m.fuel_consumed >= 100_000, "{}", m.fuel_consumed);
-    assert!(m.last_invocation.unwrap().fuel_consumed >= 100_000);
+    let total = m.fuel_consumed.expect("metered engine measures fuel");
+    assert!(total >= 100_000, "{total}");
+    assert!(m.last_invocation.unwrap().fuel_consumed.unwrap() >= 100_000);
 }
 
 #[tokio::test]
 async fn fuel_is_per_invocation() {
-    let (rt, _) = runtime();
+    let (rt, _) = runtime_metered();
     let art = load(&rt, SPIN);
     let mut iso = rt
         .spawn_isolate(&art, "t", &Grants::none(), Limits::default().with_fuel(100))
@@ -49,7 +50,7 @@ async fn fuel_is_per_invocation() {
         assert_eq!(iso.invoke("add", &[1, 2]).await.unwrap(), vec![3]);
     }
     assert!(
-        iso.metrics().fuel_consumed > 100,
+        iso.metrics().fuel_consumed.unwrap() > 100,
         "total exceeds one invocation's budget"
     );
 }
@@ -209,7 +210,7 @@ async fn table_growth_is_limited() {
 #[tokio::test]
 async fn pooling_allocator_enforces_the_same_limits() {
     use orbit_runtime::{EngineConfig, PoolingConfig, RuntimeConfig};
-    let (rt, _) = runtime_with(RuntimeConfig {
+    let (rt, _) = runtime_metered_with(RuntimeConfig {
         engine: EngineConfig {
             pooling: Some(PoolingConfig {
                 max_instances: 8,
@@ -244,7 +245,7 @@ async fn pooling_allocator_enforces_the_same_limits() {
 
 #[tokio::test]
 async fn instantiation_fuel_is_bounded_by_data_initialisation() {
-    let (rt, _) = runtime();
+    let (rt, _) = runtime_metered();
     let variants = [
         (
             "plain",
@@ -274,7 +275,7 @@ async fn instantiation_fuel_is_bounded_by_data_initialisation() {
         // (observed on Windows and macOS), Wasmtime charges the data initialisation, about one
         // unit per byte of the host pages it touches: 4097 with 4 KiB pages. A start-less
         // module must never cost more than its initialised memory.
-        let used = iso.metrics().fuel_consumed;
+        let used = iso.metrics().fuel_consumed.unwrap();
         assert!(used <= 65_537, "{name}: instantiation consumed {used} fuel");
     }
 }

@@ -9,3 +9,4 @@
 | [0005](0005-async-isolates-and-epoch-time-slices.md) | Async isolates with epoch time slices, no thread per isolate | accepted |
 | [0006](0006-shared-adapters-per-instance-handles.md) | Shared host adapters, per-instance handles | accepted |
 | [0007](0007-restricted-wasi-preview1-shim.md) | A restricted WASI preview 1 shim as a capability | accepted |
+| [0008](0008-fuel-metering-is-opt-in.md) | Fuel metering is opt-in | accepted |
