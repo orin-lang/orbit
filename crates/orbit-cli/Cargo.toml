@@ -1,0 +1,23 @@
+[package]
+name = "orbit-cli"
+description = "The `orbit` command line tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "orbit"
+path = "src/main.rs"
+
+[dependencies]
+orbit-abi.workspace = true
+orbit-runtime.workspace = true
+orbit-caps.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+
+[lints]
+workspace = true

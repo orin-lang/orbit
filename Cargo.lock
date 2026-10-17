@@ -666,9 +666,9 @@ dependencies = [
 name = "orbit-caps"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "orbit-abi",
  "orbit-runtime",
+ "serde_json",
  "tokio",
  "wasmtime",
  "wat",
@@ -683,7 +683,6 @@ dependencies = [
  "orbit-abi",
  "orbit-caps",
  "orbit-runtime",
- "serde_json",
  "tokio",
 ]
 
@@ -691,13 +690,13 @@ dependencies = [
 name = "orbit-runtime"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "orbit-abi",
  "orbit-caps",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
+ "wasmparser 0.258.3",
  "wasmtime",
  "wat",
 ]
