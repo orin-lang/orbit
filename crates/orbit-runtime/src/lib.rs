@@ -31,7 +31,7 @@ mod runtime;
 pub use artifact::{Artifact, ContentHash, ExportInfo, ImportInfo, ModuleInfo, hash_hex};
 pub use capability::{Capability, CapabilityRegistry, Grants, InstanceId, InstanceInfo, TenantId};
 pub use engine::{EngineConfig, OrbitEngine, PoolingConfig};
-pub use error::{AdmissionError, ExecError, InstantiateError, LoadError};
+pub use error::{AdmissionError, EngineError, ExecError, InstantiateError, LoadError};
 pub use host::{HostMetrics, HostState, read_guest_bytes, write_guest_bytes};
 pub use isolate::{InvocationMetrics, Isolate, IsolateMetrics};
 pub use lifecycle::{IsolateState, TransitionError};

@@ -151,3 +151,8 @@ pub enum ExecError {
     #[error("runtime is shut down")]
     Closed,
 }
+
+/// The engine could not be created (invalid configuration or platform limits).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cannot create engine: {0}")]
+pub struct EngineError(pub String);

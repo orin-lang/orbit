@@ -9,7 +9,7 @@ use tokio::sync::Semaphore;
 use crate::artifact::{Artifact, ContentHash};
 use crate::capability::{CapabilityRegistry, Grants, InstanceId, TenantId};
 use crate::engine::{EngineConfig, OrbitEngine};
-use crate::error::{AdmissionError, InstantiateError, LoadError};
+use crate::error::{AdmissionError, EngineError, InstantiateError, LoadError};
 use crate::isolate::SpawnParams;
 use crate::{Isolate, Limits};
 
@@ -83,7 +83,7 @@ impl Runtime {
     ///
     /// # Errors
     /// Fails if the engine cannot be created.
-    pub fn new(config: RuntimeConfig, registry: CapabilityRegistry) -> wasmtime::Result<Self> {
+    pub fn new(config: RuntimeConfig, registry: CapabilityRegistry) -> Result<Self, EngineError> {
         let engine = OrbitEngine::new(&config.engine)?;
         Ok(Self {
             inner: Arc::new(Inner {

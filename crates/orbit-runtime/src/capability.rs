@@ -45,6 +45,12 @@ impl fmt::Display for TenantId {
     }
 }
 
+impl From<String> for TenantId {
+    fn from(s: String) -> Self {
+        Self::new(s)
+    }
+}
+
 impl From<&str> for TenantId {
     fn from(s: &str) -> Self {
         Self::new(s)

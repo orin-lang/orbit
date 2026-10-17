@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::error::EngineError;
 use wasmtime::{Config, Engine, InstanceAllocationStrategy, PoolingAllocationConfig};
 
 /// Pooling-allocator sizing. Slots are reserved up front (as virtual memory), which makes
@@ -74,7 +75,11 @@ impl OrbitEngine {
     ///
     /// # Errors
     /// Fails if Wasmtime rejects the configuration.
-    pub fn new(config: &EngineConfig) -> wasmtime::Result<Self> {
+    pub fn new(config: &EngineConfig) -> Result<Self, EngineError> {
+        Self::build(config).map_err(|e| EngineError(format!("{e:#}")))
+    }
+
+    fn build(config: &EngineConfig) -> wasmtime::Result<Self> {
         let mut c = Config::new();
         c.consume_fuel(true);
         c.epoch_interruption(true);
