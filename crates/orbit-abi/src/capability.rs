@@ -30,6 +30,9 @@ pub struct FuncSig {
     pub params: &'static [ValKind],
     /// Result kinds.
     pub results: &'static [ValKind],
+    /// Whether the function reads or writes guest memory, which makes an exported
+    /// `memory` mandatory for modules that import it.
+    pub uses_memory: bool,
 }
 
 impl fmt::Display for FuncSig {
@@ -91,6 +94,20 @@ const fn sig(
         name,
         params,
         results,
+        uses_memory: false,
+    }
+}
+
+const fn mem_sig(
+    name: &'static str,
+    params: &'static [ValKind],
+    results: &'static [ValKind],
+) -> FuncSig {
+    FuncSig {
+        name,
+        params,
+        results,
+        uses_memory: true,
     }
 }
 
@@ -99,7 +116,7 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
     CapabilitySpec {
         name: "log",
         major: 1,
-        funcs: &[sig("write", &[I32, I64, I64], &[I32])],
+        funcs: &[mem_sig("write", &[I32, I64, I64], &[I32])],
     },
     CapabilitySpec {
         name: "clock",
@@ -112,16 +129,16 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
     CapabilitySpec {
         name: "random",
         major: 1,
-        funcs: &[sig("fill", &[I64, I64], &[I32])],
+        funcs: &[mem_sig("fill", &[I64, I64], &[I32])],
     },
     CapabilitySpec {
         name: "kv",
         major: 1,
         funcs: &[
-            sig("open", &[I64, I64], &[I64]),
-            sig("get", &[I64, I64, I64, I64, I64], &[I64]),
-            sig("put", &[I64, I64, I64, I64, I64], &[I32]),
-            sig("delete", &[I64, I64, I64], &[I32]),
+            mem_sig("open", &[I64, I64], &[I64]),
+            mem_sig("get", &[I64, I64, I64, I64, I64], &[I64]),
+            mem_sig("put", &[I64, I64, I64, I64, I64], &[I32]),
+            mem_sig("delete", &[I64, I64, I64], &[I32]),
             sig("close", &[I64], &[I32]),
         ],
     },
