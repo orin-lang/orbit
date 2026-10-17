@@ -83,7 +83,15 @@ fn registry() -> CapabilityRegistry {
 }
 
 fn runtime(pooling: bool) -> Runtime {
-    let mut engine = EngineConfig::default();
+    runtime_with(pooling, false)
+}
+
+/// `metered`: compile fuel metering into guest code (ADR-0008). Off by default in Orbit.
+fn runtime_with(pooling: bool, metered: bool) -> Runtime {
+    let mut engine = EngineConfig {
+        fuel_metering: metered,
+        ..EngineConfig::default()
+    };
     if pooling {
         engine.pooling = Some(PoolingConfig {
             max_instances: 64,
@@ -131,8 +139,13 @@ fn bench_load(c: &mut Criterion) {
 fn bench_instance(c: &mut Criterion) {
     let tk = tokio_rt();
     let mut g = c.benchmark_group("instance");
-    for (name, pooling) in [("ondemand", false), ("pooling", true)] {
-        let rt = runtime(pooling);
+    for (name, pooling, metered) in [
+        ("ondemand", false, false),
+        ("pooling", true, false),
+        ("ondemand_metered", false, true),
+        ("pooling_metered", true, true),
+    ] {
+        let rt = runtime_with(pooling, metered);
         let art = rt.load(MINIMAL.as_bytes()).expect("load");
         g.bench_function(format!("minimal_{name}"), |b| {
             b.to_async(&tk).iter(|| async {
@@ -167,6 +180,36 @@ fn bench_invoke(c: &mut Criterion) {
     let grants = Grants::none().grant(CapabilityId::log_v1());
     let limits = Limits::default().with_max_log_bytes(u64::MAX / 2);
     let mut g = c.benchmark_group("invoke");
+
+    // The same compute module on a metered engine (`Limits::fuel` unlimited: the cost is the
+    // compiled-in accounting, not the budget). Compare `fib_rec_20` with `fib_rec_20_metered`.
+    let rt_metered = runtime_with(false, true);
+    let art_metered = rt_metered.load(COMPUTE.as_bytes()).expect("load");
+    let iso_metered = tokio::sync::Mutex::new(tk.block_on(async {
+        let mut i = rt_metered
+            .spawn_isolate(&art_metered, "bench", &grants, limits.clone())
+            .await
+            .expect("spawn");
+        i.init().await.expect("init");
+        i
+    }));
+    for (name, arg) in [("fib_rec_20_metered", 20), ("fib_iter_25_metered", 25)] {
+        let func = if name.starts_with("fib_rec") {
+            "fib"
+        } else {
+            "fib_iter"
+        };
+        g.bench_function(name, |b| {
+            b.to_async(&tk).iter(|| async {
+                iso_metered
+                    .lock()
+                    .await
+                    .invoke(func, &[black_box(arg)])
+                    .await
+                    .expect("invoke")
+            });
+        });
+    }
 
     let art = rt.load(COMPUTE.as_bytes()).expect("load");
     let iso = tokio::sync::Mutex::new(tk.block_on(async {

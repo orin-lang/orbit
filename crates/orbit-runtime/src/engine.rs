@@ -34,6 +34,16 @@ pub struct EngineConfig {
     pub tick: Duration,
     /// Use the pooling instance allocator instead of the on-demand one.
     pub pooling: Option<PoolingConfig>,
+    /// Compile fuel metering into guest code (default `false`).
+    ///
+    /// Fuel is an engine-wide, compile-time Wasmtime setting: metered code pays for the
+    /// accounting on every run, even when an isolate's budget is unlimited, and costs roughly
+    /// 1.2-1.8x on compute-heavy code (see `docs/benchmarks.md`, ADR-0008). With metering off,
+    /// `Limits::fuel = Some(_)` is refused at spawn with
+    /// [`InstantiateError::FuelMeteringDisabled`](crate::InstantiateError::FuelMeteringDisabled),
+    /// fuel metrics are reported as "not measured" (`None`), and runaway code is bounded by
+    /// `Limits::timeout` (epoch deadline) alone.
+    pub fuel_metering: bool,
 }
 
 impl Default for EngineConfig {
@@ -41,6 +51,7 @@ impl Default for EngineConfig {
         Self {
             tick: Duration::from_millis(10),
             pooling: None,
+            fuel_metering: false,
         }
     }
 }
@@ -67,11 +78,12 @@ impl Drop for Ticker {
 pub struct OrbitEngine {
     engine: Engine,
     tick: Duration,
+    fuel_metering: bool,
     _ticker: Arc<Ticker>,
 }
 
 impl OrbitEngine {
-    /// Creates the engine: async execution, fuel metering, epoch interruption, Memory64.
+    /// Creates the engine: async execution, epoch interruption, optional fuel metering ([`EngineConfig::fuel_metering`]), Memory64.
     ///
     /// # Errors
     /// Fails if Wasmtime rejects the configuration.
@@ -81,7 +93,7 @@ impl OrbitEngine {
 
     fn build(config: &EngineConfig) -> wasmtime::Result<Self> {
         let mut c = Config::new();
-        c.consume_fuel(true);
+        c.consume_fuel(config.fuel_metering);
         c.epoch_interruption(true);
         c.wasm_memory64(true);
         if let Some(p) = &config.pooling {
@@ -112,6 +124,7 @@ impl OrbitEngine {
         Ok(Self {
             engine,
             tick: config.tick,
+            fuel_metering: config.fuel_metering,
             _ticker: Arc::new(Ticker {
                 stop,
                 handle: Some(handle),
@@ -125,6 +138,12 @@ impl OrbitEngine {
         &self.engine
     }
 
+    /// Whether code compiled by this engine is fuel-metered.
+    #[must_use]
+    pub fn fuel_metering(&self) -> bool {
+        self.fuel_metering
+    }
+
     /// The epoch tick.
     #[must_use]
     pub fn tick(&self) -> Duration {
@@ -136,6 +155,7 @@ impl std::fmt::Debug for OrbitEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrbitEngine")
             .field("tick", &self.tick)
+            .field("fuel_metering", &self.fuel_metering)
             .finish_non_exhaustive()
     }
 }

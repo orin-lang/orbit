@@ -9,8 +9,8 @@
 //!   [`Artifact`] that records the capabilities it requires.
 //! * [`Runtime::spawn_isolate`] checks the requirements against [`Grants`] and creates an
 //!   [`Isolate`] with its own store, memory and per-capability state, under [`Limits`].
-//! * [`Isolate::init`] / [`Isolate::invoke`] run guest code asynchronously with fuel metering,
-//!   a wall-clock deadline and cooperative yielding.
+//! * [`Isolate::init`] / [`Isolate::invoke`] run guest code asynchronously with optional fuel
+//!   metering (off by default, see `EngineConfig::fuel_metering`), a wall-clock deadline and cooperative yielding.
 //!
 //! Capabilities are implemented against the [`Capability`] trait (see the `orbit-caps` crate);
 //! the helpers [`read_guest_bytes`] and [`write_guest_bytes`] give them bounds-checked access

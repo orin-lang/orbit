@@ -13,7 +13,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
                                                         │
  orbit-runtime ─────────────────────────────────────────┼──────────────────────────────────────────────────
    Runtime      admission control (concurrency semaphore, memory budget), artifact cache, registry
-   OrbitEngine  one shared wasmtime::Engine (Cranelift, fuel, epoch interruption, async, Memory64, optional pooling)
+   OrbitEngine  one shared wasmtime::Engine (Cranelift, epoch interruption, async, Memory64, optional pooling, optional fuel metering)
    Artifact     validated + precompiled module, content hash, required capabilities, manifest
    Isolate      one Store + instance: lifecycle state machine, limits, metrics, per-capability state
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
@@ -36,11 +36,12 @@ pulling in an engine.
    signature mismatches are rejected) and reads the optional `orbit.manifest`.
 2. **Spawn** (`Runtime::spawn_isolate`): admission control reserves the isolate's memory limit from the runtime's
    budget; the grant set is checked against the artifact's requirements; a `Linker` with **only** the granted
-   capabilities is built; a fresh `Store` gets the limiter, fuel and epoch deadline. State: `Created`.
+   capabilities is built; a fresh `Store` gets the limiter, the epoch deadline and, on a metered engine, the fuel budget. `Limits::fuel` on an unmetered engine is refused (`InstantiateError::FuelMeteringDisabled`). State: `Created`.
 3. **Init**: `_initialize`, then `orbit_init`. Success: `Initialized` -> `Idle`. A trap or a non-zero result: `Failed`.
 4. **Invoke**: `Idle` -> `Running` (-> `WaitingForIo` while an async host call is pending) -> `Idle`. Fuel and the
    wall-clock deadline are reset per invocation. A trap, fuel exhaustion or a deadline leaves the isolate `Failed`;
-   it can only be terminated.
+   it can only be terminated. The one exception is `Isolate::post_mortem_i32`, which after a *trap* may read an
+   `() -> i32` export (the Orin exit status, [host-abi.md](host-abi.md) section 5) without leaving `Failed`.
 5. **Terminate**: `Stopping` -> `Terminated`; the store is dropped (linear memory, tables, handles and per-capability
    state with it) and the memory reservation is returned to the budget.
 
@@ -53,8 +54,11 @@ A dormant application is just its `Artifact` (shared compiled code) plus configu
 * **Epoch interruption** is the time slice: a ticker thread increments the engine epoch; at every deadline the guest
   yields back to the executor (`epoch_deadline_async_yield_and_update`), so one busy isolate cannot starve the others
   on a worker thread. An absolute per-invocation wall-clock budget is enforced at the same check points.
-* **Fuel** is the deterministic CPU budget per invocation (instructions, approximately). It is *measured* (the store
-  reports exact consumed fuel) but it is not CPU time.
+* **Fuel** is the deterministic CPU budget per invocation (instructions, approximately). It is **opt-in**
+  (`EngineConfig::fuel_metering`, default off, [ADR-0008](adr/0008-fuel-metering-is-opt-in.md)) because metered code
+  runs about 1.2x to 1.8x slower on compute-bound work. When on, it is *measured* (the store reports exact consumed
+  fuel) but it is not CPU time. When off, runaway code is bounded by the wall-clock deadline (`Limits::timeout`,
+  epoch based, tick-granular, not deterministic); fairness yields work in both modes.
 * **Admission control**: at most N invocations run at once (semaphore); the sum of memory limits of live isolates
   never exceeds the runtime's memory budget; above that `spawn_isolate` fails fast instead of overcommitting.
 
@@ -84,7 +88,7 @@ drops its table.
 
 | Metric | Kind |
 |---|---|
-| fuel consumed per invocation | measured (exact Wasmtime fuel) |
+| fuel consumed per invocation | measured (exact Wasmtime fuel) on a metered engine; **not measured** (`None`) otherwise |
 | wall time per invocation, instantiation latency | measured (monotonic clock) |
 | linear memory current / peak bytes | measured (limiter) |
 | host calls per capability, bytes logged | measured (counters) |

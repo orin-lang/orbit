@@ -41,10 +41,13 @@ pub struct RunArgs {
     /// Maximum linear memory in bytes.
     #[arg(long, value_name = "BYTES")]
     max_memory: Option<u64>,
-    /// Fuel per invocation (instruction budget).
+    /// Fuel per invocation (instruction budget). Passing it compiles fuel metering into the
+    /// module for this run (about 1.2-1.8x slower on compute-heavy code); without it the run
+    /// is unmetered.
     #[arg(long, value_name = "N")]
     fuel: Option<u64>,
-    /// Wall-clock timeout per invocation in milliseconds.
+    /// Wall-clock timeout per invocation in milliseconds. Without --fuel and without
+    /// --timeout-ms there is no CPU bound at all: a runaway guest runs until it is killed.
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// Tenant id attached to the isolate's log records.
@@ -114,7 +117,9 @@ pub async fn run(args: RunArgs) -> Result<i32> {
 
     let bytes = std::fs::read(&args.module)
         .with_context(|| format!("cannot read {}", args.module.display()))?;
-    let runtime = Runtime::new(RuntimeConfig::default(), registry())?;
+    let mut config = RuntimeConfig::default();
+    config.engine.fuel_metering = args.fuel.is_some();
+    let runtime = Runtime::new(config, registry())?;
     let artifact = runtime.load(&bytes).context("load failed")?;
     let mut isolate = runtime
         .spawn_isolate(&artifact, args.tenant.as_str(), &grants, limits)
@@ -125,16 +130,26 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         .exports
         .iter()
         .any(|e| e.name == "_start" && e.kind == "func");
-    let code = drive(&mut isolate, &args, has_start).await?;
+    let has_orin_main = artifact
+        .info()
+        .exports
+        .iter()
+        .any(|e| e.name == ORIN_MAIN && e.kind == "func");
+    let code = drive(&mut isolate, &args, has_start, has_orin_main).await?;
     isolate.terminate();
     Ok(code)
 }
 
-/// Initialises the isolate and runs `--invoke NAME`, or `_start` of a command module.
+const ORIN_MAIN: &str = "orin_main";
+const ORIN_EXIT_STATUS: &str = "orin_exit_status";
+
+/// Initialises the isolate and runs `--invoke NAME`, or `_start` of a command module, or
+/// `orin_main` of an Orin program (see `docs/host-abi.md` section 5).
 async fn drive(
     isolate: &mut orbit_runtime::Isolate,
     args: &RunArgs,
     has_start: bool,
+    has_orin_main: bool,
 ) -> Result<i32> {
     match isolate.init().await {
         Ok(()) => {}
@@ -143,6 +158,9 @@ async fn drive(
     }
     if let Some(code) = isolate.exit_code() {
         return Ok(code);
+    }
+    if args.invoke.is_none() && !has_start && has_orin_main {
+        return run_orin_main(isolate).await;
     }
     let entry = args.invoke.as_deref().unwrap_or("_start");
     if args.invoke.is_none() && !has_start {
@@ -157,5 +175,25 @@ async fn drive(
         }
         Err(ExecError::Exit(code)) => Ok(code),
         Err(e) => Err(e).with_context(|| format!("`{entry}` failed")),
+    }
+}
+
+/// Calls `orin_main` and returns its result as the exit status. After a trap, asks
+/// `orin_exit_status` (when exported) for the status the program set; -1, a missing export or
+/// a failing call mean a genuine trap, which is reported as the error.
+async fn run_orin_main(isolate: &mut orbit_runtime::Isolate) -> Result<i32> {
+    match isolate.invoke(ORIN_MAIN, &[]).await {
+        Ok(results) => Ok(results
+            .first()
+            .map_or(0, |r| i32::try_from(*r).unwrap_or(1))),
+        Err(ExecError::Exit(code)) => Ok(code),
+        Err(e @ ExecError::Trap(_)) => match isolate.post_mortem_i32(ORIN_EXIT_STATUS).await {
+            Some(status) if status != -1 => {
+                eprintln!("error: `{ORIN_MAIN}` failed: {e}");
+                Ok(status)
+            }
+            _ => Err(e).context(format!("`{ORIN_MAIN}` failed")),
+        },
+        Err(e) => Err(e).with_context(|| format!("`{ORIN_MAIN}` failed")),
     }
 }

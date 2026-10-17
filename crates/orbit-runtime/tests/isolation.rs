@@ -34,7 +34,7 @@ async fn instances_of_one_artifact_do_not_share_state() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn different_modules_run_concurrently() {
-    let (rt, _) = runtime();
+    let (rt, _) = runtime_metered();
     let counter = load(&rt, COUNTER);
     let spin = load(&rt, SPIN);
     let none = orbit_runtime::Grants::none();
@@ -92,6 +92,8 @@ async fn invoke_arguments_and_results() {
     // Argument errors do not poison the isolate.
     assert_eq!(iso.state(), IsolateState::Idle);
     let m = iso.metrics();
-    assert!(m.fuel_consumed > 0);
+    // The default engine has no fuel metering: fuel is not measured (not "0").
+    assert_eq!(m.fuel_consumed, None);
+    assert_eq!(m.last_invocation.unwrap().fuel_consumed, None);
     assert_eq!(m.invocations, 3);
 }

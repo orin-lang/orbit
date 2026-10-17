@@ -14,6 +14,16 @@ pub fn runtime_with(config: RuntimeConfig) -> (Runtime, MemorySink) {
     (Runtime::new(config, registry).expect("runtime"), sink)
 }
 
+/// A runtime whose engine compiles fuel metering in (needed for `Limits::fuel`).
+pub fn runtime_metered_with(mut config: RuntimeConfig) -> (Runtime, MemorySink) {
+    config.engine.fuel_metering = true;
+    runtime_with(config)
+}
+
+pub fn runtime_metered() -> (Runtime, MemorySink) {
+    runtime_metered_with(RuntimeConfig::default())
+}
+
 pub fn runtime() -> (Runtime, MemorySink) {
     runtime_with(RuntimeConfig::default())
 }

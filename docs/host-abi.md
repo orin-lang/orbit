@@ -146,9 +146,18 @@ A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecErro
 | `memory` | if a pointer-taking import is used | the guest's linear memory |
 | `_initialize` | no | called once when the instance is initialised (WASI reactor convention) |
 | `_start` | no | WASI command entry point; `orbit run` without `--invoke` calls it and exits with the guest's `proc_exit` code (0 if it returns) |
+| `orin_main() -> i32` | no | Orin convention ([orin-integration.md](orin-integration.md) section 2a): the program entry point. `orbit run` without `--invoke` and without `_start` calls it and exits with its result (a non-zero status that wraps to 0 modulo 256 becomes 1) |
+| `orin_exit_status() -> i32` | no | Orin convention: after `orin_main` trapped, the exit status the program set, or `-1` for a genuine trap. Read once by `orbit run` (library: `Isolate::post_mortem_i32`) |
 | `orbit_init` | no | called once after `_initialize`; a trap or a non-zero `i32` result fails initialisation |
 | any function | — | invocable by name with integer arguments |
 | `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads (events, HTTP bodies) in a later version |
+
+Orin entry point. `post_mortem_i32(export)` is the only way to run guest code in the `Failed` state. It is allowed only
+after an `ExecError::Trap` (not after fuel exhaustion, a deadline, a memory-limit trap, a `proc_exit` or a failed
+`orbit_init`), only for an export of exactly the type `() -> i32`, under its own budget (100 000 fuel on a metered
+engine, and the invocation timeout capped at 250 ms), and it never leaves `Failed`. It returns `None` if the call itself
+traps or exceeds that budget. `orbit run` prints the original trap to stderr and exits with the status when it is not
+`-1`; for `-1` (or no export, or a failing call) it reports the original trap and exits 1.
 
 ## 6. The capability manifest
 
