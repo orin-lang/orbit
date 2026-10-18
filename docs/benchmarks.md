@@ -13,6 +13,7 @@ cargo bench --workspace -- --test                              # smoke test: eac
 
 cargo run --release -p orbit-runtime --example density -- 1000             # N isolates, on-demand allocator
 cargo run --release -p orbit-runtime --example density -- 1000 --pooling   # N isolates, pooling allocator
+cargo run --release -p orbit-runtime --example density -- 1000 --pool      # N idle isolates in an InstancePool
 ```
 
 Benchmark source: `crates/orbit-runtime/benches/runtime.rs`; density: `crates/orbit-runtime/examples/density.rs`.
@@ -30,6 +31,12 @@ Benchmark source: `crates/orbit-runtime/benches/runtime.rs`; density: `crates/or
 | `invoke/fib_rec_20` | Recursive Fibonacci(20) (about 22k calls), a compute-bound call. |
 | `invoke/fib_rec_20_metered`, `invoke/fib_iter_25_metered`, `instance/*_metered` | The same modules on a runtime built with `EngineConfig::fuel_metering = true` (ADR-0008); `Limits::fuel` stays unlimited, so the difference to the unsuffixed rows is the compiled-in accounting. |
 | `invoke/host_call_log_32b` | Invocation whose guest makes one `orbit:log/v1` `write` of 32 bytes to a sink that discards it (`NullSink`, defined in the bench): invoke overhead plus one host-call round trip. |
+| `pool/spawn_init_invoke_terminate_{ondemand,pooling}` | No pool: spawn + init + one `add` invoke + terminate, the cost of a cold request. |
+| `pool/fresh_hit_acquire_invoke_release_*` | `FreshPerAcquire` pool, **prewarmed outside the timed region** (in chunks of 128): `acquire` (hit) + `add` invoke + release, where release terminates the used isolate (so tear-down is included). |
+| `pool/fresh_miss_acquire_invoke_release_*` | The same pool with nothing idle: the acquire creates the isolate (pool overhead on top of the cold path). |
+| `pool/reuse_acquire_invoke_release_*` | `Reuse` pool with an unlimited `max_uses`: the same isolate serves every request (steady state, state is kept). |
+| `pool/heavy_init_*` | A module whose `orbit_init` touches 1 MiB and loops 200k times: cold spawn+init+invoke+terminate versus a prewarmed fresh hit. This is the case pools are for. |
+| `pool/spawn_init_invoke_terminate_pooling_{density,latency}` | The pooling allocator with `PoolingConfig::density` (nothing kept resident) versus `::latency` (1 MiB of memory, 64 KiB of table and stack kept resident per free slot). |
 | `density` example | Spawns N idle, initialised isolates of a 1-page-memory module (kept alive), reports process `VmRSS` before and after (from `/proc/self/status`; prints `unsupported` elsewhere), the delta per isolate, and p50/p99/max latency of spawn+init. |
 
 Benchmarks run on a single-threaded Tokio runtime with the epoch ticker (10 ms). **Fuel metering is off** (Orbit's
@@ -84,6 +91,58 @@ Density, 1000 isolates, 1 page (64 KiB) of declared memory each, one run per row
 |---|---|---|---|---|---|
 | on-demand | 9.4 MB | about 9.4 KB | 13.4 µs | 45.5 µs | 239 µs |
 | pooling (1000 slots, 1 MiB max) | 9.4 MB | about 9.4 KB | 8.9 µs | 41.0 µs | 433 µs |
+
+### Instance pools and allocator tuning (milestone 3)
+
+Same machine, short run (`cargo bench -p orbit-runtime --bench runtime -- pool/ --warm-up-time 1 --measurement-time 3`),
+taken while other builds were running on the same 4 vCPUs, so absolute values are inflated compared with the first
+table (the on-demand spawn row here is about 21 µs where the first table has about 7 µs). Compare rows within this
+table only. Median [interval].
+
+| Per request | on-demand allocator | pooling allocator (512 slots) |
+|---|---|---|
+| spawn + init + invoke + terminate (no pool) | 21.9 µs [20.7, 23.2] | 4.60 µs [4.42, 4.79] |
+| `FreshPerAcquire`, prewarmed hit: acquire + invoke + release | 18.2 µs [17.4, 19.1] | 3.52 µs [3.35, 3.73] |
+| `FreshPerAcquire`, miss (acquire creates) | 21.8 µs [20.9, 22.7] | 4.79 µs [4.64, 4.96] |
+| `Reuse`, steady state | 1.56 µs [1.48, 1.65] | 1.31 µs [1.27, 1.35] |
+
+| Heavy-init module (1 MiB touched, 200k-iteration `orbit_init`), on-demand | Median [interval] |
+|---|---|
+| spawn + init + invoke + terminate | 1.04 ms [0.97, 1.13] |
+| `FreshPerAcquire`, prewarmed hit: acquire + invoke + release | 265 µs [225, 302] |
+
+| Pooling allocator, spawn + init + invoke + terminate, 1-page module | Median [interval] |
+|---|---|
+| `PoolingConfig::density` (nothing kept resident) | 4.45 µs [4.28, 4.65] |
+| `PoolingConfig::latency` (1 MiB memory, 64 KiB table/stack kept resident) | 5.78 µs [5.62, 5.95] |
+
+Density example with `--pool` (1000 idle, prewarmed isolates, 1 page of declared memory, `Limits::max_memory_bytes` =
+1 MiB, one run each):
+
+| Allocator | Prewarm | RSS per idle pooled isolate | Admission reserved per isolate | Acquire (hit) p50 / p99 | `reclaim_idle` |
+|---|---|---|---|---|---|
+| on-demand | 16.4 ms for 1000 | about 9.8 KB | 1 MiB (1000 MiB total) | 383 ns / 792 ns | reserved 1000 MiB -> 0; RSS 22.9 MB -> 18.8 MB |
+| pooling | 19.6 ms for 1000 | about 9.7 KB | 1 MiB | 154 ns / 6.4 µs | reserved 1000 MiB -> 0; RSS unchanged (slots stay resident) |
+
+What these say, and do not say:
+
+* A prewarmed hit takes the instantiation and initialisation off the request path. With a trivial module that is
+  worth only a few microseconds, because instantiation itself is cheap; the **tear-down of the used isolate remains in
+  the request path** (release terminates synchronously), which is why the fresh hit is only about 15% below the cold
+  path here. With a module that has real start-up work the saving is large (1.04 ms -> 265 µs; most of the remaining
+  265 µs is tearing down a store with 1 MiB of touched memory). Moving termination off the request path is possible
+  future work.
+* `Reuse` is about 12x (on-demand) and 2.7x (pooling) cheaper than a fresh hit for the trivial module, and it is the only mode where guest
+  state survives. Its number is the fixed overhead of acquire + invoke + release, not a statement about real programs.
+* The density example's "acquire" time stops when `acquire` returns; the release (termination) is not included.
+* Idle pooled isolates cost RSS (about 9.8 KB each here) and, much more importantly for admission, the full memory
+  *limit* in the budget (1 MiB each): 1000 idle isolates reserve 1000 MiB. `reclaim_idle` returned all of it. With the
+  pooling allocator RSS did not drop after reclaim in this run (slot memory is retained by the allocator, and no
+  keep-resident bytes were configured), so do not read admission-budget release as an RSS release.
+* The `latency` preset was **slower** than `density` on this 1-page module (5.8 vs 4.5 µs, with overlapping noise
+  from a shared VM): keeping memory resident helps modules that touch much more memory per request, which this one
+  does not. Measure with your own module before choosing a preset; no claim is made that either is better in general.
+* The "concurrent 500 acquires" scenario is a correctness test (`tests/pool.rs`), not a benchmark.
 
 ## Reading the numbers, and caveats
 

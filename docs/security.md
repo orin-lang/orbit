@@ -50,6 +50,10 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
   anything, including terminal escape sequences).
 * `proc_exit(0)` terminates the isolate, so a WASI command cannot be invoked twice; run a command module once, or
   build a reactor (`_initialize`) for repeated calls.
+* Instance pools ([ADR-0009](adr/0009-instance-pools-fresh-by-default.md)) are fresh-per-acquire by default. With
+  `ReusePolicy::Reuse` an isolate keeps its memory, globals, tables and capability handles across requests of the
+  same tenant; do not enable it when requests of one tenant must be isolated from each other. A pool is bound to one
+  tenant and one grant set, so state never crosses tenants.
 * The ABI is version 1 and may still change before a stability declaration.
 
 ## Hardening path
