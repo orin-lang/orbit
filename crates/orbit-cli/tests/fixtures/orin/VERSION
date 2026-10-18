@@ -1,0 +1,3 @@
+orin-lang commit: 40a42552d4a442034027c97d4c830eaddf08f9c3
+command: orin build --release --target=wasm{32,64}-orbit (CC=clang)
+built: 2026-10-18

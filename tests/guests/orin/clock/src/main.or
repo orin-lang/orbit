@@ -1,0 +1,9 @@
+import { Host, useClock } from "std:host";
+import { monotonicNow, nowMillis } from "std:time";
+
+function main(host: Host): void {
+  useClock(host, clock => {
+    console.log("monotonic ok: " + monotonicNow(clock).isOk().toString());
+    console.log("wall clock after 2020: " + (nowMillis(clock) > 1577836800000).toString());
+  });
+}

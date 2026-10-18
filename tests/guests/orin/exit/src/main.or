@@ -1,0 +1,7 @@
+import { exit } from "std:process";
+
+function main(): void {
+  console.log("about to exit");
+  exit(7);
+  console.log("unreachable");
+}

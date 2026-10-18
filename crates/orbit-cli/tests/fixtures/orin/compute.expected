@@ -1,0 +1,4 @@
+fib(35)=9227465
+primes<=5000000: 348513
+collatz(1..300000) steps: 35669725
+words: 1000 last w81
