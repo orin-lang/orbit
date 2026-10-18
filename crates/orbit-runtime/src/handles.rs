@@ -110,6 +110,12 @@ impl<T> HandleTable<T> {
         value
     }
 
+    /// Whether `max_live` values are open (the next [`insert`](Self::insert) would fail).
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.live >= self.max_live
+    }
+
     /// Number of open handles.
     #[must_use]
     pub fn len(&self) -> usize {

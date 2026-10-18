@@ -34,7 +34,7 @@ pub use capability::{Capability, CapabilityRegistry, Grants, InstanceId, Instanc
 pub use engine::{EngineConfig, OrbitEngine, PoolingConfig};
 pub use error::{AdmissionError, EngineError, ExecError, GuestExit, InstantiateError, LoadError};
 pub use handles::{HandleTable, MAX_HANDLES, TableFull};
-pub use host::{HostMetrics, HostState, read_guest_bytes, write_guest_bytes};
+pub use host::{HostMetrics, HostState, check_guest_range, read_guest_bytes, write_guest_bytes};
 pub use isolate::{InvocationMetrics, Isolate, IsolateMetrics};
 pub use lifecycle::{IsolateState, TransitionError};
 pub use limits::Limits;

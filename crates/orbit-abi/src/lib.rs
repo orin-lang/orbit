@@ -54,4 +54,13 @@ pub mod limits {
     pub const KV_MAX_KEY_BYTES: u64 = 1024;
     /// Maximum KV value size.
     pub const KV_MAX_VALUE_BYTES: u64 = 1024 * 1024;
+    /// Default maximum number of open sockets (listeners and streams) per isolate in `orbit:net/v1`.
+    pub const NET_DEFAULT_MAX_SOCKETS: usize = 64;
+    /// Default maximum bytes moved by one `stream_recv` / `stream_send` call (larger requests
+    /// are served partially, which both calls allow).
+    pub const NET_DEFAULT_MAX_BYTES_PER_CALL: u64 = 1024 * 1024;
+    /// Largest accepted `timeout_ms` of a waiting `orbit:net/v1` call (one hour).
+    pub const NET_MAX_TIMEOUT_MS: i32 = 3_600_000;
+    /// Maximum number of live wake sources per isolate.
+    pub const NET_MAX_WAKE_SOURCES: usize = 4096;
 }
