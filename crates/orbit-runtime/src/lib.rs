@@ -12,6 +12,10 @@
 //! * [`Isolate::init`] / [`Isolate::invoke`] run guest code asynchronously with optional fuel
 //!   metering (off by default, see `EngineConfig::fuel_metering`), a wall-clock deadline and cooperative yielding.
 //!
+//! [`Runtime::pool`] keeps pre-initialised idle isolates ready for one tenant and one grant set
+//! ([`InstancePool`]): fresh-per-request by default, optional reuse, scale-to-zero, and LRU
+//! eviction under memory pressure ([`Runtime::reclaim_idle`]).
+//!
 //! Capabilities are implemented against the [`Capability`] trait (see the `orbit-caps` crate);
 //! the helpers [`read_guest_bytes`] and [`write_guest_bytes`] give them bounds-checked access
 //! to guest memory.
@@ -27,6 +31,7 @@ mod host;
 mod isolate;
 mod lifecycle;
 mod limits;
+mod pool;
 mod runtime;
 
 pub use artifact::{Artifact, ContentHash, ExportInfo, ImportInfo, ModuleInfo, hash_hex};
@@ -38,4 +43,5 @@ pub use host::{HostMetrics, HostState, read_guest_bytes, write_guest_bytes};
 pub use isolate::{InvocationMetrics, Isolate, IsolateMetrics};
 pub use lifecycle::{IsolateState, TransitionError};
 pub use limits::Limits;
+pub use pool::{InstancePool, PoolConfig, PoolError, PoolStats, PooledIsolate, ReusePolicy};
 pub use runtime::{Runtime, RuntimeConfig};

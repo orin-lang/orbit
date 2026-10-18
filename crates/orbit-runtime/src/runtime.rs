@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::Semaphore;
 
@@ -11,6 +11,7 @@ use crate::capability::{CapabilityRegistry, Grants, InstanceId, TenantId};
 use crate::engine::{EngineConfig, OrbitEngine};
 use crate::error::{AdmissionError, EngineError, InstantiateError, LoadError};
 use crate::isolate::SpawnParams;
+use crate::pool::PoolShared;
 use crate::{Isolate, Limits};
 
 /// Configuration of a [`Runtime`].
@@ -69,6 +70,7 @@ struct Inner {
     semaphore: Arc<Semaphore>,
     budget: Arc<Budget>,
     next_id: AtomicU64,
+    pools: Mutex<Vec<Weak<PoolShared>>>,
 }
 
 /// Owns the engine, the capabilities the host implements, the compiled-artifact cache and
@@ -96,6 +98,7 @@ impl Runtime {
                     reserved: Mutex::new(0),
                 }),
                 next_id: AtomicU64::new(1),
+                pools: Mutex::new(Vec::new()),
             }),
         })
     }
@@ -161,6 +164,10 @@ impl Runtime {
     /// is reserved ([`AdmissionError`]); then the module is instantiated under `limits`.
     /// Nothing guest-controlled runs before the grant check passes.
     ///
+    /// If the budget is exhausted and [instance pools](crate::InstancePool) hold idle isolates,
+    /// the least recently used idle isolates are evicted ([`Runtime::reclaim_idle`]) and the
+    /// reservation is tried once more.
+    ///
     /// # Errors
     /// An [`InstantiateError`].
     pub async fn spawn_isolate(
@@ -170,6 +177,43 @@ impl Runtime {
         grants: &Grants,
         limits: Limits,
     ) -> Result<Isolate, InstantiateError> {
+        self.spawn_inner(artifact, tenant.into(), grants, limits, true)
+            .await
+    }
+
+    /// `reclaim`: whether a failed memory reservation may evict idle pooled isolates.
+    pub(crate) async fn spawn_inner(
+        &self,
+        artifact: &Arc<Artifact>,
+        tenant: TenantId,
+        grants: &Grants,
+        limits: Limits,
+        reclaim: bool,
+    ) -> Result<Isolate, InstantiateError> {
+        self.check_grants(artifact, grants)?;
+        let reservation = match self.reserve(limits.max_memory_bytes) {
+            Ok(r) => r,
+            Err(e) if reclaim && self.reclaim_idle(limits.max_memory_bytes) > 0 => {
+                self.reserve(limits.max_memory_bytes).map_err(|_| e)?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let id = InstanceId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
+        let params = SpawnParams {
+            id,
+            tenant,
+            limits,
+            semaphore: Arc::clone(&self.inner.semaphore),
+            reservation,
+        };
+        Isolate::create(artifact, grants, &self.inner.engine, params).await
+    }
+
+    pub(crate) fn check_grants(
+        &self,
+        artifact: &Artifact,
+        grants: &Grants,
+    ) -> Result<(), InstantiateError> {
         for id in artifact.required() {
             if !grants.contains(id) {
                 return Err(InstantiateError::NotGranted(id.clone()));
@@ -180,16 +224,34 @@ impl Runtime {
                 return Err(InstantiateError::Unavailable(id.clone()));
             }
         }
-        let reservation = self.reserve(limits.max_memory_bytes)?;
-        let id = InstanceId(self.inner.next_id.fetch_add(1, Ordering::Relaxed));
-        let params = SpawnParams {
-            id,
-            tenant: tenant.into(),
-            limits,
-            semaphore: Arc::clone(&self.inner.semaphore),
-            reservation,
-        };
-        Isolate::create(artifact, grants, &self.inner.engine, params).await
+        Ok(())
+    }
+
+    /// Memory admission budget not currently reserved.
+    pub(crate) fn free_memory_bytes(&self) -> u64 {
+        self.inner
+            .budget
+            .total
+            .saturating_sub(self.reserved_memory_bytes())
+    }
+
+    pub(crate) fn register_pool(&self, pool: Weak<PoolShared>) {
+        let mut pools = self.pools();
+        pools.retain(|p| p.strong_count() > 0);
+        pools.push(pool);
+    }
+
+    pub(crate) fn live_pools(&self) -> Vec<Arc<PoolShared>> {
+        let mut pools = self.pools();
+        pools.retain(|p| p.strong_count() > 0);
+        pools.iter().filter_map(Weak::upgrade).collect()
+    }
+
+    fn pools(&self) -> std::sync::MutexGuard<'_, Vec<Weak<PoolShared>>> {
+        self.inner
+            .pools
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn reserve(&self, bytes: u64) -> Result<MemoryReservation, AdmissionError> {
