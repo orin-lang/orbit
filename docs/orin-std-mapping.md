@@ -1,8 +1,13 @@
 # Orin std on Orbit: L0 to capability mapping
 
-Status: **contract for the Orin wasm platform layer (L0)**. Orbit implements the capabilities named here. The compiler
-side (`runtime/platform/orbit/orin_platform_orbit.c` in orin-lang) is being rebuilt against this table; until it lands,
-the wasm L0 still returns `EPERM` for files and network and the compiler refuses such programs with E0523.
+Status: **contract for the Orin wasm platform layer (L0)**, implemented in orin-lang `runtime/platform/orbit/`
+(orin-lang/orin-lang#63). Unchanged Orin programs that use std:process args, std:io stdin, std:fs, std:path, std:net
+and std:http run on Orbit; the compiler lists process/v1, fs/v1 and net/v1 in the module's manifest as needed and
+refuses (E0523) only the shell.
+
+* `arg(i, ptr, 0)` on a non-empty argument returns ERR_TOO_LARGE without the length; the L0 retries with a growing
+  buffer (128 bytes up to 1 MiB).
+* A single thread serves one connection at a time; a blocked accept ends by its timeout.
 
 Goal (Henry, 2026-10-18): **unchanged Orin code runs on Orbit**. A program uses `std:net`, `std:http`, `std:fs`,
 `std:process`, `std:time` and `std:task` as it does natively; nothing in Orin imports an Orbit library. The `orbit:*`
@@ -25,14 +30,14 @@ imports are only the target of L0, the one layer of the Orin runtime that differ
 |---|---|---|---|---|
 | `std:io`, `Console` | write, write_line, flush | `orbit:log/v1` write | `--grant log/v1` | done |
 | `std:time` | now_millis, monotonic_millis | `orbit:clock/v1` | `--grant clock/v1` | done |
-| `std:process` args | arg_count, arg | `orbit:process/v1` arg_count, arg | `--app-arg X` | Orbit done, L0 pending |
-| `std:process` env | getenv | `orbit:process/v1` env_get | `--env K=V`, `--env-pass K` | Orbit done, L0 pending |
-| `std:io` stdin | stdin_read, stdin_getc | `orbit:process/v1` stdin_read | `--grant process:stdin` | Orbit done, L0 pending |
+| `std:process` args | arg_count, arg | `orbit:process/v1` arg_count, arg | `--app-arg X` | done |
+| `std:process` env | getenv | `orbit:process/v1` env_get | `--env K=V`, `--env-pass K` | not used by L0: nothing in std reads the environment yet, and importing env_get unconditionally would make process/v1 a required grant for every program that starts a task. Planned: an explicit std API (an env read behind the process grant) that imports env_get only when used |
+| `std:io` stdin | stdin_read, stdin_getc | `orbit:process/v1` stdin_read | `--grant process:stdin` | done |
 | `std:process` exit | exit, at_exit, abort | export `orin_exit_status` | none | done |
-| `std:fs` | file_read, file_write, file_exists, dir_list, stream_*, file_rename, file_remove, dir_remove, file_write_atomic | `orbit:fs/v1` | `--grant fs:/data=./dir:ro\|rw`, `--cwd` | Orbit done, L0 pending |
-| `std:path` | path_absolute, path_real | `orbit:fs/v1` cwd, realpath | (with fs) | Orbit done, L0 pending |
-| `std:net`, `std:http` | net_narrow, tcp_listen, tcp_accept, tcp_connect, stream_recv, stream_send, net_shutdown, net_close, dns_resolve | `orbit:net/v1` | `--grant net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen` | Orbit done, L0 pending |
-| `std:task` cancellation | wake_open, wake_close, wake_signal, wake_check, wake_bind, wake_bound | `orbit:net/v1` wake_* | (with net) | Orbit done, L0 pending |
+| `std:fs` | file_read, file_write, file_exists, dir_list, stream_*, file_rename, file_remove, dir_remove, file_write_atomic | `orbit:fs/v1` | `--grant fs:/data=./dir:ro\|rw`, `--cwd` | done for read, write, exists, list, streams; rename, remove and atomic write pending (no L0 entry point yet) |
+| `std:path` | path_absolute, path_real | `orbit:fs/v1` cwd, realpath | (with fs) | done |
+| `std:net`, `std:http` | net_narrow, tcp_listen, tcp_accept, tcp_connect, stream_recv, stream_send, net_shutdown, net_close, dns_resolve | `orbit:net/v1` | `--grant net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen` | done (net_narrow stays pure in L0) |
+| `std:task` cancellation | wake_open, wake_close, wake_signal, wake_check, wake_bind, wake_bound | `orbit:net/v1` wake_* | (with net) | L0-local flags; waits pass wake 0. With one thread a token is never set while a host call blocks, and host wake_* would import net/v1 into every task program. Revisit with orbit:thread/v1 |
 | `std:task` tasks | thread_create, thread_join, thread_exit, thread_id, cpu_count | `orbit:thread/v1` spawn + export `orin_thread_start` | `--grant thread/v1` | **proposed, not built** |
 | `std:task` monitors | monitor_* | `memory.atomic.wait32` / `notify` on shared memory, no import | none | **proposed, L0 only** |
 | `std:host` shell | shell, shell_timeout | none | none | not available: returns -1 |
