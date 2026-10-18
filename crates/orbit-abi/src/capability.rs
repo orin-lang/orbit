@@ -157,6 +157,16 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         wasm32_only: false,
     },
     CapabilitySpec {
+        name: "queue",
+        major: 1,
+        funcs: &[
+            mem_sig("publish", &[I64, I64, I64, I64], &[I32]),
+            mem_sig("publish_batch", &[I64, I64, I64, I64], &[I32]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
         name: "net",
         major: 1,
         funcs: NET_FUNCS,
@@ -317,6 +327,12 @@ impl CapabilityId {
         Self::new("kv", 1)
     }
 
+    /// `orbit:queue/v1`.
+    #[must_use]
+    pub fn queue_v1() -> Self {
+        Self::new("queue", 1)
+    }
+
     /// `orbit:net/v1`.
     #[must_use]
     pub fn net_v1() -> Self {
@@ -468,7 +484,7 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 8);
+        assert_eq!(CAPABILITIES.len(), 9);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
     }
 

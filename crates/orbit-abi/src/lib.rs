@@ -54,6 +54,12 @@ pub mod limits {
     pub const KV_MAX_KEY_BYTES: u64 = 1024;
     /// Maximum KV value size.
     pub const KV_MAX_VALUE_BYTES: u64 = 1024 * 1024;
+    /// Maximum queue name length in `orbit:queue/v1`.
+    pub const QUEUE_MAX_NAME_BYTES: u64 = 255;
+    /// Maximum size of one queue message in `orbit:queue/v1`.
+    pub const QUEUE_MAX_MESSAGE_BYTES: u64 = 1024 * 1024;
+    /// Maximum number of messages in one `orbit:queue/v1` `publish_batch`.
+    pub const QUEUE_MAX_BATCH_MESSAGES: usize = 256;
     /// Default maximum number of open sockets (listeners and streams) per isolate in `orbit:net/v1`.
     pub const NET_DEFAULT_MAX_SOCKETS: usize = 64;
     /// Default maximum bytes moved by one `stream_recv` / `stream_send` call (larger requests

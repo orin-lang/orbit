@@ -41,6 +41,9 @@ pub struct RunArgs {
     /// KV namespace the module may open with `kv/v1` (repeatable).
     #[arg(long = "kv-namespace", value_name = "NAME")]
     kv_namespaces: Vec<String>,
+    /// Queue the module may publish to with `queue/v1` (repeatable; in-memory, dropped on exit).
+    #[arg(long = "publish-queue", value_name = "NAME")]
+    publish_queues: Vec<String>,
     /// Argument for a module granted `wasi_p1/v1`, after argv[0] (`main`); repeatable.
     #[arg(long = "wasi-arg", value_name = "ARG", allow_hyphen_values = true)]
     wasi_args: Vec<String>,
@@ -98,6 +101,9 @@ pub fn registry() -> CapabilityRegistry {
         .with(RandomCapability::new())
         .with(NetCapability::new())
         .with(KvCapability::new(InMemoryKv::new()))
+        .with(orbit_caps::QueueCapability::new(
+            orbit_caps::InMemoryQueue::new(),
+        ))
         .with(wasi)
         .with(FsCapability::new())
         .with(ProcessCapability::new().with_stdin(HostStdin::new()))
@@ -208,6 +214,8 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         }
         grants = if id == CapabilityId::kv_v1() {
             grants.grant_with(id, serde_json::json!({ "namespaces": args.kv_namespaces }))
+        } else if id == CapabilityId::queue_v1() {
+            grants.grant_with(id, serde_json::json!({ "publish": args.publish_queues }))
         } else if id == CapabilityId::wasi_p1_v1() {
             grants.grant_with(id, wasi_config(&args)?)
         } else {
@@ -264,6 +272,9 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     }
     if !args.kv_namespaces.is_empty() && !grants.contains(&CapabilityId::kv_v1()) {
         bail!("--kv-namespace requires --grant kv/v1");
+    }
+    if !args.publish_queues.is_empty() && !grants.contains(&CapabilityId::queue_v1()) {
+        bail!("--publish-queue requires --grant queue/v1");
     }
     let mut limits = Limits::default();
     if let Some(m) = args.max_memory {
