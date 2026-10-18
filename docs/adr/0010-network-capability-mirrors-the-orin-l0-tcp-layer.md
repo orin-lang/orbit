@@ -15,7 +15,7 @@ programs: they listen, accept, read and write. The `orbit:*` imports are only th
 ## Decision
 1. The event plan (`orbit_alloc` / `orbit_on_event`, `dispatch_event`, `orbit:http/v1`, an HTTP server crate) is dropped.
    HTTP is Orin library code on top of TCP.
-2. `orbit:net/v1` ([host-abi.md](../host-abi.md) section 4b) mirrors the L0 TCP functions one to one: listen, accept,
+2. `orbit:net/v1` ([host-abi.md](../host-abi.md) section 4d) mirrors the L0 TCP functions one to one: listen, accept,
    connect, recv, send, shutdown, close, DNS resolve and wake sources. Orbit conventions apply (`i64` pointers and
    lengths, status codes); the L0 out-parameters become return values, and four statuses are added (`ERR_EOF`,
    `ERR_TIMEOUT`, `ERR_RESET`, `ERR_CANCELLED`).

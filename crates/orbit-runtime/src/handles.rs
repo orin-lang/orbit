@@ -101,6 +101,12 @@ impl<T> HandleTable<T> {
         self.slots[self.decode(handle)?].value.as_ref()
     }
 
+    /// Resolves a handle for mutation.
+    pub fn get_mut(&mut self, handle: i64) -> Option<&mut T> {
+        let index = self.decode(handle)?;
+        self.slots[index].value.as_mut()
+    }
+
     /// Closes a handle and returns its value.
     pub fn remove(&mut self, handle: i64) -> Option<T> {
         let index = self.decode(handle)?;

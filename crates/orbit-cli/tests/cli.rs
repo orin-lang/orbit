@@ -449,3 +449,170 @@ fn fuel_flag_enables_metering_and_still_runs_orin_main() {
     let o = orbit(&["run", &path("orin_exit7.wat"), "--fuel", "1000000"]);
     assert_eq!(code(&o), 7, "{}", stderr(&o));
 }
+
+fn mount_dir() -> tempfile::TempDir {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("a.txt"), b"hello").unwrap();
+    d
+}
+
+#[test]
+fn fs_and_process_are_denied_without_grants() {
+    let o = orbit(&["run", &path("fsproc.wat"), "--invoke", "run"]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("capability not granted: fs/v1"),
+        "{}",
+        stderr(&o)
+    );
+    let d = mount_dir();
+    let spec = format!("fs:/d={}", d.path().display());
+    let o = orbit(&[
+        "run",
+        &path("fsproc.wat"),
+        "--grant",
+        &spec,
+        "--invoke",
+        "run",
+    ]);
+    assert!(
+        stderr(&o).contains("capability not granted: process/v1"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn fs_mounts_and_process_args_env() {
+    let d = mount_dir();
+    let spec = format!("fs:/d={}:ro", d.path().display());
+    // 5 bytes read, argv = [module, x, y] -> 30, FOO=abc -> 300; process/v1 is granted
+    // automatically by --app-arg/--env.
+    let o = orbit(&[
+        "run",
+        &path("fsproc.wat"),
+        "--grant",
+        &spec,
+        "--app-arg",
+        "x",
+        "--app-arg",
+        "y",
+        "--env",
+        "FOO=abc",
+        "--invoke",
+        "run",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "335");
+    // --env-pass copies exactly one host variable.
+    let o = Command::new(env!("CARGO_BIN_EXE_orbit"))
+        .env("ORBIT_TEST_FOO", "12345678")
+        .args([
+            "run",
+            &path("fsproc.wat"),
+            "--grant",
+            &spec,
+            "--env-pass",
+            "ORBIT_TEST_FOO",
+            "--invoke",
+            "run",
+        ])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", stderr(&o));
+    // FOO is not defined here: env_get returns ERR_NOT_FOUND (-3): 5 + 10 - 300.
+    assert_eq!(stdout(&o).trim(), "-285");
+}
+
+#[test]
+fn fs_ro_mount_refuses_writes_and_rw_allows_them() {
+    let d = mount_dir();
+    for (mode, want_ok) in [("ro", false), ("rw", true)] {
+        let spec = format!("fs:/d={}:{mode}", d.path().display());
+        let o = orbit(&[
+            "run",
+            &path("fsproc.wat"),
+            "--grant",
+            &spec,
+            "--app-arg",
+            "a",
+            "--invoke",
+            "wr",
+        ]);
+        assert!(o.status.success(), "{}", stderr(&o));
+        let r: i64 = stdout(&o).trim().parse().unwrap();
+        assert_eq!(r > 0, want_ok, "{mode}: {r}");
+        if !want_ok {
+            assert_eq!(r, -2);
+        }
+    }
+    assert!(d.path().join("out.txt").exists());
+}
+
+#[test]
+fn fs_flags_are_validated() {
+    let o = orbit(&[
+        "run",
+        &path("fsproc.wat"),
+        "--grant",
+        "fs:/d=/nonexistent-dir-xyz",
+        "--invoke",
+        "run",
+    ]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("cannot open host directory"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(
+        !stderr(&o).contains("/nonexistent-dir-xyz:"),
+        "{}",
+        stderr(&o)
+    );
+    let o = orbit(&["run", &path("fsproc.wat"), "--cwd", "/", "--invoke", "run"]);
+    assert!(stderr(&o).contains("require --grant fs"), "{}", stderr(&o));
+    let d = mount_dir();
+    let spec = format!("fs:/d={}", d.path().display());
+    let o = orbit(&[
+        "run",
+        &path("fsproc.wat"),
+        "--grant",
+        &spec,
+        "--grant",
+        "process:nope",
+        "--invoke",
+        "run",
+    ]);
+    assert!(stderr(&o).contains("process:stdin"), "{}", stderr(&o));
+}
+
+#[test]
+fn stdin_needs_the_process_stdin_grant() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let run = |extra: &[&str]| {
+        let mut args = vec!["run", "fsproc_PATH", "--grant", "fs/v1", "--invoke", "in"];
+        args.extend(extra);
+        let p = path("fsproc.wat");
+        let args: Vec<&str> = args
+            .iter()
+            .map(|a| if *a == "fsproc_PATH" { p.as_str() } else { a })
+            .collect();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_orbit"))
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"abc").unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let o = run(&["--grant", "process:stdin"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "3");
+    // process/v1 granted for args only: stdin is denied (-2).
+    let o = run(&["--app-arg", "x"]);
+    assert_eq!(stdout(&o).trim(), "-2");
+}

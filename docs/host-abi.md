@@ -1,7 +1,8 @@
 # Orbit host ABI, version 1
 
-Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1), `orbit:net/v1` (section 4b) and
-`wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a).
+Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1),
+`wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a), then `orbit:fs/v1`, `orbit:process/v1` and
+`orbit:net/v1` (milestone 3, sections 4b to 4d).
 Everything marked *reserved* is a design, not a feature.
 
 This document is the contract between a guest module (an Orin program compiled to WebAssembly, or any other module)
@@ -45,9 +46,12 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -6 | `ERR_QUOTA` | a per-instance budget of this capability is exhausted |
 | -7 | `ERR_IO` | the host adapter failed |
 | -8 | `ERR_EOF` | orderly end of a stream (`orbit:net/v1` `recv`) |
-| -9 | `ERR_TIMEOUT` | a waiting call hit its timeout |
+| -9 | `ERR_TIMEOUT` | a waiting call hit its timeout (net, `process.stdin_read`) |
 | -10 | `ERR_RESET` | connection reset, aborted, or broken pipe |
 | -11 | `ERR_CANCELLED` | a waiting call was cancelled through its wake source |
+| -12 | `ERR_EXISTS` | the object already exists |
+| -13 | `ERR_NOT_DIR` | a path component is not a directory |
+| -14 | `ERR_IS_DIR` | the path names a directory where a file is needed |
 
 ## 4. Capabilities in version 1
 
@@ -96,7 +100,144 @@ Keys are 1 byte to 1 KiB (an empty key is `ERR_INVALID`), values at most 1 MiB. 
 handle reports `ERR_BAD_HANDLE` even when a buffer is also invalid. The namespaces an instance may open are part of its grant; the storage of a
 namespace is scoped by tenant, so two tenants opening `"cache"` never see each other's keys.
 
-## 4b. `orbit:net/v1`: TCP, an image of the Orin L0 network layer
+## 4a. `wasi_p1/v1`: restricted WASI preview 1
+
+A compatibility shim so modules built by standard toolchains (clang with wasi-libc, Rust's `wasm32-wasip1`) run
+unchanged ([ADR-0007](adr/0007-restricted-wasi-preview1-shim.md)). It is **an ordinary capability**: manifest form
+`wasi_p1/v1` (underscore, because capability names are `[a-z0-9_]`), granted with `--grant wasi_p1/v1`, never linked
+without a grant. Differences from every `orbit:*` capability:
+
+* the import module is the literal **`wasi_snapshot_preview1`** (`orbit:wasi_p1/v1` is *not* an import module name);
+* the signatures are the exact WASI ones: pointers and sizes are **`i32`**, `fd_seek` offset and the `clock_time_get`
+  precision are `i64`, functions return a WASI **errno** (`u16` in an `i32`; 0 is success) instead of the ABI status
+  codes of section 3, and `proc_exit` returns nothing;
+* WASI preview 1 is **wasm32-only**. A module whose exported `memory` is a 64-bit memory and that imports any
+  `wasi_snapshot_preview1` function is rejected at load (`LoadError::Memory64Unsupported`). A wasm64 Orin build has to
+  use the `orbit:*` capabilities.
+
+Only the functions below exist. **Any other `wasi_snapshot_preview1` import (`path_open`, `fd_pread`, `sock_*`, ...)
+fails at load with `unknown import`**, so there is no WASI function that exists but quietly refuses. Pointers are
+checked like everywhere else; a bad pointer is `EFAULT` (21), never a trap.
+
+| Function | Behaviour |
+|---|---|
+| `fd_write(fd, iovs, n, nwritten)` | fd 1 (stdout) -> the host log sink at **info**, fd 2 (stderr) -> **warn**. Output is split into lines per instance and per stream, a record has no trailing newline, an unterminated line is cut at 16 KiB, and whatever is buffered is flushed **when the invocation ends** (return, trap, exit or deadline) and on `fd_close`. A call accepts at most 1 MiB (a longer write is partial) and at most 1024 iovecs (`EINVAL`). Bytes count against the instance's per-invocation log budget (`Limits::max_log_bytes`, also reported in `bytes_logged`); a partial write is returned when the budget runs out, `ENOSPC` (51) when nothing fits. Any other fd, or a closed one: `EBADF` (8). |
+| `fd_read(fd, iovs, n, nread)` | stdin is always empty: fd 0 reads 0 bytes (EOF). Other fds: `EBADF`. |
+| `fd_close(fd)` | closes fd 0/1/2 (later use is `EBADF`); otherwise `EBADF`. |
+| `fd_seek(fd, off, whence, out)` | stdio is a stream: `ESPIPE` (70); other fds `EBADF`. |
+| `fd_fdstat_get(fd, buf)`, `fd_filestat_get(fd, buf)`, `fd_fdstat_set_flags(fd, flags)` | fds 0-2 are character devices (filetype 2, size 0, read right for 0, write right for 1 and 2, no path rights); `set_flags` accepts and ignores. Other fds `EBADF`. |
+| `fd_prestat_get(fd, buf)`, `fd_prestat_dir_name(fd, p, len)` | always `EBADF`: **there are no preopened directories**. |
+| `args_sizes_get`, `args_get` | argv is `["main"]` unless the grant config has `"args": [...]`, which is the *complete* argv (argv[0] included; an empty list gives an empty argv). Non-string entries and entries containing NUL are dropped. |
+| `environ_sizes_get`, `environ_get` | empty unless the grant config has `"env": {"K": "V", ...}` (sorted by key; non-string values, empty keys, keys containing `=` and NULs are dropped). The host's own arguments and environment are never visible. |
+| `clock_time_get(id, precision, out)`, `clock_res_get(id, out)` | `ENOTCAPABLE` (76) **unless the instance is also granted `clock/v1`**. Then ids 0 (realtime) and 1 (monotonic, since instance creation) use the same time source and the same coarsening (`resolution_ns` of the `clock/v1` grant, default 1 ms) as `orbit:clock/v1`; ids 2 and 3 (CPU time) are `ENOTSUP` (58), others `EINVAL` (28). The requested precision is ignored. |
+| `random_get(buf, len)` | `ENOTCAPABLE` **unless the instance is also granted `random/v1`**; then at most 64 KiB per call (`EINVAL` above), OS CSPRNG. Rust's `HashMap` seeds itself with `random_get`, so Rust programs that use one need `random/v1`. |
+| `sched_yield()` | success, no effect. |
+| `poll_oneoff(...)` | `ENOSYS` (52). |
+| `proc_exit(code)` | ends the invocation (section 5). |
+
+**Grant config** (an object, all keys optional): `{"args": ["main", "--flag"], "env": {"MODE": "prod"}}`. On the CLI:
+`--grant wasi_p1/v1 --wasi-arg --flag --wasi-env MODE=prod` (`--wasi-arg` values come after `main`).
+
+**`proc_exit`**: the host function unwinds the guest with `GuestExit(code)`. `Isolate::init` / `invoke` then report:
+
+| `code` | Result | Isolate state |
+|---|---|---|
+| 0 | `Ok` (no return values); `Isolate::exit_code()` is `Some(0)` | `Terminated` (a program that exited cannot be re-entered) |
+| non-zero | `Err(ExecError::Exit(code))`; `exit_code()` is `Some(code)` | `Failed` (only `terminate` is possible) |
+
+A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecError::Trap`, not an exit.
+
+## 4b. `orbit:fs/v1`: files under virtual mounts
+
+Designed so the Orin L0 platform layer's file functions (`orin_platform_file_*`, `dir_list`, `stream_*`, `path_*`) can be
+implemented faithfully, and so unchanged `std:fs` code runs on Orbit ([ADR-0011](adr/0011-fs-and-process-capabilities-mirror-the-orin-l0-layer.md)).
+Functions returning `i64` return a value `>= 0` or a negative status; handles are `> 0`. **Whenever an output buffer is
+too small the call returns `ERR_TOO_LARGE` and writes nothing.**
+
+```
+open(path_ptr: i64, path_len: i64, mode: i32) -> i64     // handle; mode 0 read, 1 write (create/truncate), 2 append (create)
+read(h: i64, out_ptr: i64, out_cap: i64) -> i64          // bytes read, 0 = end of file; may be short
+write(h: i64, ptr: i64, len: i64) -> i64                 // bytes written; may be short (loop)
+flush(h: i64) -> i32
+close(h: i64) -> i32                                     // also closes directory handles
+stat(path_ptr: i64, path_len: i64) -> i32                // 0 none, 1 file (anything not a directory), 2 directory
+size(path_ptr: i64, path_len: i64) -> i64                // size of a file in bytes
+dir_open(path_ptr: i64, path_len: i64) -> i64            // handle
+dir_next(h: i64, out_ptr: i64, out_cap: i64) -> i64      // name length | 0x4000_0000_0000_0000 if a directory; 0 = end
+dir_close(h: i64) -> i32
+realpath(path_ptr: i64, path_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length of the virtual canonical path
+cwd(out_ptr: i64, out_cap: i64) -> i64                   // length of the virtual working directory (absolute)
+```
+
+**Authority is the mounts in the grant.** A mount binds a virtual absolute path to a host directory, read-only or
+read-write. CLI: `--grant fs:/data=./hostdir:ro` (`:rw` for write; read-only if the suffix is omitted; repeatable,
+several mounts allowed; mounts may not overlap or nest). Embedders use `FsGrant` (`orbit-caps`), whose JSON is
+`{"mounts":[{"guest":"/data","host":"/abs/dir","writable":false}],"cwd":"/","max_handles":64,"max_write_bytes":null}`.
+A malformed config grants nothing.
+
+**Path resolution.** A guest path is bytes that must be UTF-8 without NUL (`ERR_INVALID`), non-empty (`ERR_NOT_FOUND`)
+and at most 4096 bytes (`ERR_TOO_LARGE`). A relative path resolves against the virtual cwd (`/`, or `--cwd`). The
+result is normalised lexically (`.` and empty components dropped, `..` removes the previous component and is dropped at
+the root), like the L0's `path_normalize`. The normalised path must lie in a mount, otherwise **`ERR_DENIED`**; so
+`/data/../etc/passwd` and any host absolute path are denied. Inside a mount the remainder is resolved relative to the
+mount's directory handle by the OS-level confinement of `cap-std`: `..` that leaves the mount (for example through a
+symlink), absolute symlinks and symlinks that point outside are `ERR_DENIED`; symlinks that stay inside are followed.
+A write (`open` with mode 1 or 2) on a read-only mount is `ERR_DENIED` **before any OS call**. A proper ancestor of a
+mount (`/` when mounts are `/data` and `/work`) is a read-only virtual directory: `stat` says 2, `dir_open` lists the
+mount names, `open` is `ERR_IS_DIR`.
+
+**Semantics.**
+* `open`: a directory is `ERR_IS_DIR`; a path component that is a file is `ERR_NOT_DIR`; a missing file (mode 0) or a
+  missing parent (modes 1, 2) is `ERR_NOT_FOUND`; a non-regular file (FIFO, device) is `ERR_DENIED` and never opened.
+  `read` on a write handle and `write` on a read handle are `ERR_INVALID`. The host does not buffer: `write` hands bytes
+  to the OS, `flush` is a no-op on the host side (the L0 buffers).
+* `read` returns at most 1 MiB per call (a larger `out_cap` is clamped, so a short read is not end of file; only 0 is).
+  `write` accepts at most 1 MiB per call and returns the count written; the caller loops. A bad output range is
+  `ERR_INVALID` **before** any byte is consumed.
+* `stat`: a missing path is `0` (not an error); `ERR_DENIED` outside the mounts; the size comes from `size` (a missing
+  file is `ERR_NOT_FOUND`, a directory `ERR_IS_DIR`). A whole-file read is `size` + `open` + `read` loop + `close`.
+* `dir_next` enumerates a directory opened by `dir_open` in OS order, without `.` and `..`. The directory flag is true
+  only for real directories (a symlink to a directory is **not** flagged). A name that does not fit in `out_cap` gives
+  `ERR_TOO_LARGE` and is **not consumed**: call again with a bigger buffer. Names that are not valid UTF-8 are skipped.
+  `0` means the end; an I/O error in the middle is a negative status and the caller discards the partial listing.
+* `realpath`: the longest existing prefix with symlinks resolved, then the non-existing rest unchanged; the result is a
+  **virtual** path (never a host path). `ERR_NOT_FOUND` if the first missing component is a dangling symlink, `ERR_DENIED`
+  for an escaping link.
+* Handles (files and directories) live in the per-instance `HandleTable`; a stale, forged or foreign handle is
+  `ERR_BAD_HANDLE`; a handle of the wrong kind (`dir_next` on a file) is `ERR_INVALID`.
+
+**Quotas.** Open handles per instance (default 64, `--fs-max-handles`, `ERR_QUOTA` on `open`/`dir_open`); at most
+1 MiB per `read`/`write` call; optional total bytes written over the instance's life (`--fs-max-write-bytes`; a
+`write` that would pass it is `ERR_QUOTA` and writes nothing).
+
+**Errors.** Host failures become status codes only: not found, denied (including OS permission errors), is-a-directory,
+not-a-directory, name too long (`ERR_TOO_LARGE`) have their own codes; everything else (disk full, I/O error, link loop,
+too many host files) is `ERR_IO`. Host paths and OS error text never reach the guest.
+
+## 4c. `orbit:process/v1`: arguments, environment, standard input
+
+```
+arg_count() -> i32
+arg(i: i32, out_ptr: i64, out_cap: i64) -> i64                       // length; ERR_INVALID if i is out of range
+env_get(name_ptr: i64, name_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length; ERR_NOT_FOUND if unset
+stdin_read(out_ptr: i64, out_cap: i64, timeout_ms: i64) -> i64       // bytes, 0 = end of input
+```
+
+Nothing is inherited from the host: the argument vector and the environment are exactly what the grant carries
+(`{"args":["prog","x"],"env":{"K":"V"},"stdin":false}`, `ProcessGrant`). The capability is **deny by default** like
+all others, including `arg_count`: a module that imports it without the grant fails with `NotGranted`. The CLI grants it
+for you when `--app-arg X` (repeatable; argv[0] is the module file name without extension, then the arguments),
+`--env K=V`, `--env-pass K` (copies that one host variable if it is set; never the whole environment) or
+`--grant process/v1` is given; standard input needs `--grant process:stdin`. The existing `--arg` (for `--invoke`) and
+`--wasi-arg`/`--wasi-env` (WASI) are unchanged. An empty value is defined (`0` length); `=` or NUL in a name is
+`ERR_INVALID`. A value that does not fit gives `ERR_TOO_LARGE` with nothing written (query with `out_cap` 0, retry).
+
+`stdin_read` without the stdin grant is `ERR_DENIED`. It returns what is available, at most `out_cap` and 1 MiB
+(a short read is not end of input; only `0` is). `timeout_ms < 0` waits without bound, `0` polls, otherwise the call is
+`ERR_TIMEOUT` if no byte arrived in time. The CLI reads the process's stdin from a helper thread (shared by all isolates
+of the process). Reads block a Tokio worker for the wait, so use a timeout in multi-tenant embeddings.
+
+## 4d. `orbit:net/v1`: TCP, an image of the Orin L0 network layer
 
 Unchanged Orin `std:net` / `std:http` code reaches the network through the L0 functions `orin_platform_tcp_*`,
 `orin_platform_stream_recv/send`, `orin_platform_net_*`, `orin_platform_dns_resolve` and `orin_platform_wake_*`. This
@@ -160,53 +301,6 @@ allow). At most 4096 live wake sources. Terminating the isolate closes all its s
 wait on it is still running in another call is released when that wait ends.
 
 All of it works with 32-bit and 64-bit memories.
-
-## 4a. `wasi_p1/v1`: restricted WASI preview 1
-
-A compatibility shim so modules built by standard toolchains (clang with wasi-libc, Rust's `wasm32-wasip1`) run
-unchanged ([ADR-0007](adr/0007-restricted-wasi-preview1-shim.md)). It is **an ordinary capability**: manifest form
-`wasi_p1/v1` (underscore, because capability names are `[a-z0-9_]`), granted with `--grant wasi_p1/v1`, never linked
-without a grant. Differences from every `orbit:*` capability:
-
-* the import module is the literal **`wasi_snapshot_preview1`** (`orbit:wasi_p1/v1` is *not* an import module name);
-* the signatures are the exact WASI ones: pointers and sizes are **`i32`**, `fd_seek` offset and the `clock_time_get`
-  precision are `i64`, functions return a WASI **errno** (`u16` in an `i32`; 0 is success) instead of the ABI status
-  codes of section 3, and `proc_exit` returns nothing;
-* WASI preview 1 is **wasm32-only**. A module whose exported `memory` is a 64-bit memory and that imports any
-  `wasi_snapshot_preview1` function is rejected at load (`LoadError::Memory64Unsupported`). A wasm64 Orin build has to
-  use the `orbit:*` capabilities.
-
-Only the functions below exist. **Any other `wasi_snapshot_preview1` import (`path_open`, `fd_pread`, `sock_*`, ...)
-fails at load with `unknown import`**, so there is no WASI function that exists but quietly refuses. Pointers are
-checked like everywhere else; a bad pointer is `EFAULT` (21), never a trap.
-
-| Function | Behaviour |
-|---|---|
-| `fd_write(fd, iovs, n, nwritten)` | fd 1 (stdout) -> the host log sink at **info**, fd 2 (stderr) -> **warn**. Output is split into lines per instance and per stream, a record has no trailing newline, an unterminated line is cut at 16 KiB, and whatever is buffered is flushed **when the invocation ends** (return, trap, exit or deadline) and on `fd_close`. A call accepts at most 1 MiB (a longer write is partial) and at most 1024 iovecs (`EINVAL`). Bytes count against the instance's per-invocation log budget (`Limits::max_log_bytes`, also reported in `bytes_logged`); a partial write is returned when the budget runs out, `ENOSPC` (51) when nothing fits. Any other fd, or a closed one: `EBADF` (8). |
-| `fd_read(fd, iovs, n, nread)` | stdin is always empty: fd 0 reads 0 bytes (EOF). Other fds: `EBADF`. |
-| `fd_close(fd)` | closes fd 0/1/2 (later use is `EBADF`); otherwise `EBADF`. |
-| `fd_seek(fd, off, whence, out)` | stdio is a stream: `ESPIPE` (70); other fds `EBADF`. |
-| `fd_fdstat_get(fd, buf)`, `fd_filestat_get(fd, buf)`, `fd_fdstat_set_flags(fd, flags)` | fds 0-2 are character devices (filetype 2, size 0, read right for 0, write right for 1 and 2, no path rights); `set_flags` accepts and ignores. Other fds `EBADF`. |
-| `fd_prestat_get(fd, buf)`, `fd_prestat_dir_name(fd, p, len)` | always `EBADF`: **there are no preopened directories**. |
-| `args_sizes_get`, `args_get` | argv is `["main"]` unless the grant config has `"args": [...]`, which is the *complete* argv (argv[0] included; an empty list gives an empty argv). Non-string entries and entries containing NUL are dropped. |
-| `environ_sizes_get`, `environ_get` | empty unless the grant config has `"env": {"K": "V", ...}` (sorted by key; non-string values, empty keys, keys containing `=` and NULs are dropped). The host's own arguments and environment are never visible. |
-| `clock_time_get(id, precision, out)`, `clock_res_get(id, out)` | `ENOTCAPABLE` (76) **unless the instance is also granted `clock/v1`**. Then ids 0 (realtime) and 1 (monotonic, since instance creation) use the same time source and the same coarsening (`resolution_ns` of the `clock/v1` grant, default 1 ms) as `orbit:clock/v1`; ids 2 and 3 (CPU time) are `ENOTSUP` (58), others `EINVAL` (28). The requested precision is ignored. |
-| `random_get(buf, len)` | `ENOTCAPABLE` **unless the instance is also granted `random/v1`**; then at most 64 KiB per call (`EINVAL` above), OS CSPRNG. Rust's `HashMap` seeds itself with `random_get`, so Rust programs that use one need `random/v1`. |
-| `sched_yield()` | success, no effect. |
-| `poll_oneoff(...)` | `ENOSYS` (52). |
-| `proc_exit(code)` | ends the invocation (section 5). |
-
-**Grant config** (an object, all keys optional): `{"args": ["main", "--flag"], "env": {"MODE": "prod"}}`. On the CLI:
-`--grant wasi_p1/v1 --wasi-arg --flag --wasi-env MODE=prod` (`--wasi-arg` values come after `main`).
-
-**`proc_exit`**: the host function unwinds the guest with `GuestExit(code)`. `Isolate::init` / `invoke` then report:
-
-| `code` | Result | Isolate state |
-|---|---|---|
-| 0 | `Ok` (no return values); `Isolate::exit_code()` is `Some(0)` | `Terminated` (a program that exited cannot be re-entered) |
-| non-zero | `Err(ExecError::Exit(code))`; `exit_code()` is `Some(code)` | `Failed` (only `terminate` is possible) |
-
-A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecError::Trap`, not an exit.
 
 ## 5. Guest exports
 

@@ -12,3 +12,4 @@
 | [0008](0008-fuel-metering-is-opt-in.md) | Fuel metering is opt-in | accepted |
 | [0009](0009-instance-pools-fresh-by-default.md) | Instance pools are fresh-per-acquire by default | accepted |
 | [0010](0010-network-capability-mirrors-the-orin-l0-tcp-layer.md) | Network capability mirrors the Orin L0 TCP layer | accepted |
+| [0011](0011-fs-and-process-capabilities-mirror-the-orin-l0-layer.md) | File system and process capabilities mirror the Orin L0 layer | accepted |

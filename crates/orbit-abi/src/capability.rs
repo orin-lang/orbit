@@ -164,6 +164,38 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         wasm32_only: false,
     },
     CapabilitySpec {
+        name: "fs",
+        major: 1,
+        funcs: &[
+            mem_sig("open", &[I64, I64, I32], &[I64]),
+            mem_sig("read", &[I64, I64, I64], &[I64]),
+            mem_sig("write", &[I64, I64, I64], &[I64]),
+            sig("flush", &[I64], &[I32]),
+            sig("close", &[I64], &[I32]),
+            mem_sig("stat", &[I64, I64], &[I32]),
+            mem_sig("size", &[I64, I64], &[I64]),
+            mem_sig("dir_open", &[I64, I64], &[I64]),
+            mem_sig("dir_next", &[I64, I64, I64], &[I64]),
+            sig("dir_close", &[I64], &[I32]),
+            mem_sig("realpath", &[I64, I64, I64, I64], &[I64]),
+            mem_sig("cwd", &[I64, I64], &[I64]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
+        name: "process",
+        major: 1,
+        funcs: &[
+            sig("arg_count", &[], &[I32]),
+            mem_sig("arg", &[I32, I64, I64], &[I64]),
+            mem_sig("env_get", &[I64, I64, I64, I64], &[I64]),
+            mem_sig("stdin_read", &[I64, I64, I64], &[I64]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
         name: "wasi_p1",
         major: 1,
         funcs: WASI_P1_FUNCS,
@@ -172,7 +204,7 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
     },
 ];
 
-/// The functions of `orbit:net/v1` (`docs/host-abi.md` section 4b): an image of the Orin L0 TCP
+/// The functions of `orbit:net/v1` (`docs/host-abi.md` section 4d): an image of the Orin L0 TCP
 /// layer. Results are `i64` (a value `>= 0`, a handle `> 0`, or a negative status) or `i32`
 /// status; there are no out-parameters.
 pub static NET_FUNCS: &[FuncSig] = &[
@@ -289,6 +321,16 @@ impl CapabilityId {
     #[must_use]
     pub fn net_v1() -> Self {
         Self::new("net", 1)
+    }
+    /// `orbit:fs/v1`.
+    #[must_use]
+    pub fn fs_v1() -> Self {
+        Self::new("fs", 1)
+    }
+    /// `orbit:process/v1`.
+    #[must_use]
+    pub fn process_v1() -> Self {
+        Self::new("process", 1)
     }
 
     /// Capability name, e.g. `log`.
@@ -426,7 +468,7 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 6);
+        assert_eq!(CAPABILITIES.len(), 8);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
     }
 

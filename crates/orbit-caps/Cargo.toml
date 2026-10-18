@@ -14,10 +14,17 @@ serde_json.workspace = true
 getrandom = "0.3"
 tokio.workspace = true
 socket2 = { version = "0.6", features = ["all"] }
+cap-std = "3.4.5"
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3.27.0"
 tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "macros"] }
 wat.workspace = true
+
+[[bench]]
+name = "fs"
+harness = false
 
 [lints]
 workspace = true

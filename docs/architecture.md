@@ -19,7 +19,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
                                                         │
  orbit-caps ────────────────────────────────────────────┼──────────────────────────────────────────────────
-   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  wasi_p1/v1 (wasi_snapshot_preview1)
+   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:fs/v1  orbit:process/v1  wasi_p1/v1
    adapters     LogSink (stderr, memory)   KvStore (in-memory, tenant-scoped)   ... later: Postgres pool, Kafka, S3
                                                         │
  orbit-abi ─────────────────────────────────────────────┴──────────────────────────────────────────────────
@@ -109,7 +109,7 @@ drops its table.
 
 ## Network path
 
-A server is an ordinary guest. `orbit:net/v1` ([host-abi.md](host-abi.md) section 4b) gives it L0-shaped TCP calls; the
+A server is an ordinary guest. `orbit:net/v1` ([host-abi.md](host-abi.md) section 4d) gives it L0-shaped TCP calls; the
 waiting ones are `func_wrap_async` host functions, so a guest blocked in `accept` or `recv` is a suspended wasm stack
 and a Tokio task, not a thread. Each call resolves its handle in the isolate's table (`Arc<NetShared>`: sockets, wake
 sources, scopes, quotas), checks the grant scope, clones the `Arc` of the socket out of the lock, and awaits it with

@@ -18,14 +18,20 @@ pub const ERR_TOO_LARGE: i32 = -5;
 pub const ERR_QUOTA: i32 = -6;
 /// The host adapter failed.
 pub const ERR_IO: i32 = -7;
-/// Orderly end of a stream (`orbit:net/v1` `stream_recv`): the peer closed its sending side.
+/// End of stream (net).
 pub const ERR_EOF: i32 = -8;
-/// A waiting call hit its timeout (`orbit:net/v1`).
+/// A timeout expired.
 pub const ERR_TIMEOUT: i32 = -9;
-/// The connection was reset, aborted or the pipe is broken (`orbit:net/v1`).
+/// The peer reset the connection (net).
 pub const ERR_RESET: i32 = -10;
-/// A waiting call was cancelled through its wake source (`orbit:net/v1`).
+/// The operation was cancelled.
 pub const ERR_CANCELLED: i32 = -11;
+/// The object already exists.
+pub const ERR_EXISTS: i32 = -12;
+/// A path component is not a directory.
+pub const ERR_NOT_DIR: i32 = -13;
+/// The path names a directory where a file is needed.
+pub const ERR_IS_DIR: i32 = -14;
 
 /// Symbolic name of a status code, for diagnostics.
 #[must_use]
@@ -43,6 +49,9 @@ pub fn name(code: i32) -> &'static str {
         ERR_TIMEOUT => "ERR_TIMEOUT",
         ERR_RESET => "ERR_RESET",
         ERR_CANCELLED => "ERR_CANCELLED",
+        ERR_EXISTS => "ERR_EXISTS",
+        ERR_NOT_DIR => "ERR_NOT_DIR",
+        ERR_IS_DIR => "ERR_IS_DIR",
         _ => "UNKNOWN",
     }
 }
