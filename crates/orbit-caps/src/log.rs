@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use orbit_abi::{CapabilityId, limits::LOG_MAX_MESSAGE_BYTES, status};
@@ -125,8 +126,10 @@ impl LogSink for MemorySink {
 
 /// Per-instance state: bytes accepted in the current invocation against the budget.
 #[derive(Debug)]
+/// `used` is shared by the guest threads of an isolate, so spawning threads does not multiply
+/// the log budget.
 struct LogState {
-    used: u64,
+    used: Arc<AtomicU64>,
     budget: u64,
 }
 
@@ -182,10 +185,20 @@ fn write(
     let Some(state) = host.cap_state_mut::<LogState>(id) else {
         return status::ERR_IO;
     };
-    if state.used.saturating_add(n) > state.budget {
-        return status::ERR_QUOTA;
+    let budget = state.budget;
+    let mut cur = state.used.load(Ordering::SeqCst);
+    loop {
+        let Some(next) = cur.checked_add(n).filter(|t| *t <= budget) else {
+            return status::ERR_QUOTA;
+        };
+        match state
+            .used
+            .compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => break,
+            Err(now) => cur = now,
+        }
     }
-    state.used += n;
     let record = LogRecord {
         instance: host.instance_id(),
         tenant: host.tenant().clone(),
@@ -222,14 +235,29 @@ impl Capability for LogCapability {
         _config: &serde_json::Value,
     ) -> Box<dyn Any + Send> {
         Box::new(LogState {
-            used: 0,
+            used: Arc::new(AtomicU64::new(0)),
             budget: info.max_log_bytes,
         })
     }
 
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        match parent.downcast_ref::<LogState>() {
+            Some(s) => Box::new(LogState {
+                used: Arc::clone(&s.used),
+                budget: s.budget,
+            }),
+            None => self.instance_state(info, config),
+        }
+    }
+
     fn begin_invocation(&self, state: &mut (dyn Any + Send)) {
         if let Some(s) = state.downcast_mut::<LogState>() {
-            s.used = 0;
+            s.used.store(0, Ordering::SeqCst);
         }
     }
 }

@@ -5,9 +5,12 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use orbit_abi::{CapabilityId, MANIFEST_SECTION, MEMORY_EXPORT, Manifest, ValKind};
+use orbit_abi::{
+    CapabilityId, MANIFEST_SECTION, MEMORY_EXPORT, Manifest, SHARED_MEMORY_IMPORT,
+    THREAD_START_EXPORT, ValKind,
+};
 use sha2::{Digest, Sha256};
-use wasmparser::{Parser, Payload};
+use wasmparser::{DataKind, Parser, Payload};
 use wasmtime::{ExternType, InstancePre, Linker, Module, ValType};
 
 use crate::capability::{Capability, CapabilityRegistry};
@@ -164,6 +167,50 @@ fn kind_of(v: &ValType) -> Option<ValKind> {
     }
 }
 
+/// The shared memory a threaded module imports as `env.memory`, as declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SharedMemoryDecl {
+    /// Declared minimum, in 64 KiB pages.
+    pub min_pages: u64,
+    /// Declared maximum, in 64 KiB pages.
+    pub max_pages: u64,
+}
+
+/// Scans the module for what threads cannot support: a shared memory the module defines itself
+/// and (when `threaded`) active data segments.
+fn scan_memory_use(wasm: &[u8], threaded: bool) -> Result<(), LoadError> {
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload {
+            Ok(Payload::MemorySection(reader)) => {
+                for m in reader.into_iter().flatten() {
+                    if m.shared {
+                        return Err(LoadError::BadSharedMemory(
+                            "the module defines a shared memory; a shared memory must be imported as \
+                             `(import \"env\" \"memory\" (memory N MAX shared))` (link with \
+                             --shared-memory --import-memory)"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            Ok(Payload::DataSection(reader)) if threaded => {
+                for d in reader.into_iter().flatten() {
+                    if matches!(d.kind, DataKind::Active { .. }) {
+                        return Err(LoadError::ThreadModule(
+                            "an active data segment would be applied again by every thread instance \
+                             and overwrite live memory; use passive segments (link with \
+                             --shared-memory, which makes wasm-ld emit `__wasm_init_memory`)"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// A validated, compiled module ready to be instantiated, together with its capability
 /// requirements. Cheap to share (`Arc<Artifact>`); see [`Runtime::load`](crate::Runtime::load).
 pub struct Artifact {
@@ -173,7 +220,13 @@ pub struct Artifact {
     manifest: Option<Manifest>,
     required: BTreeSet<CapabilityId>,
     imported: BTreeSet<CapabilityId>,
-    pre: InstancePre<HostState>,
+    /// For a module without a shared memory import: the linked instantiation template. A
+    /// threaded module cannot be pre-linked (its memory is created per isolate).
+    pre: Option<InstancePre<HostState>>,
+    /// For a threaded module: the linker with every required capability, to which each isolate
+    /// adds its own `env.memory`.
+    linker: Option<Linker<HostState>>,
+    shared_memory: Option<SharedMemoryDecl>,
     linked: Vec<Arc<dyn Capability>>,
 }
 
@@ -202,8 +255,37 @@ impl Artifact {
             e.name() == MEMORY_EXPORT && matches!(e.ty(), ExternType::Memory(m) if m.is_64())
         });
 
+        let mut shared_memory = None;
         let mut imported = BTreeSet::new();
         for import in module.imports() {
+            if (import.module(), import.name()) == SHARED_MEMORY_IMPORT {
+                let ExternType::Memory(m) = import.ty() else {
+                    return Err(LoadError::NonFunctionImport {
+                        module: import.module().to_owned(),
+                        name: import.name().to_owned(),
+                        kind: describe(&import.ty()).0,
+                    });
+                };
+                if !m.is_shared() {
+                    return Err(LoadError::BadSharedMemory(
+                        "`env.memory` is imported as an unshared memory; Orbit provides only a \
+                         shared one: `(import \"env\" \"memory\" (memory N MAX shared))` (link with \
+                         --shared-memory --import-memory). A module that exports its own \
+                         unshared `memory` needs no import"
+                            .into(),
+                    ));
+                }
+                if m.is_64() {
+                    return Err(LoadError::BadSharedMemory(
+                        "`env.memory` is a 64-bit memory; shared memory is wasm32 only".into(),
+                    ));
+                }
+                shared_memory = Some(SharedMemoryDecl {
+                    min_pages: m.minimum(),
+                    max_pages: m.maximum().unwrap_or(65_536),
+                });
+                continue;
+            }
             let unknown = || LoadError::UnknownImport {
                 module: import.module().to_owned(),
                 name: import.name().to_owned(),
@@ -229,7 +311,7 @@ impl Artifact {
                     found: describe(&import.ty()).1.unwrap_or_default(),
                 });
             }
-            if expected.uses_memory && !has_memory_export {
+            if expected.uses_memory && !has_memory_export && shared_memory.is_none() {
                 return Err(LoadError::MissingMemoryExport {
                     module: import.module().to_owned(),
                     name: import.name().to_owned(),
@@ -247,6 +329,37 @@ impl Artifact {
             }
             imported.insert(id);
         }
+
+        let threaded = imported.contains(&CapabilityId::thread_v1());
+        if threaded {
+            if shared_memory.is_none() {
+                return Err(LoadError::ThreadModule(
+                    "`orbit:thread/v1` needs the shared memory import \
+                     `(import \"env\" \"memory\" (memory N MAX shared))`"
+                        .into(),
+                ));
+            }
+            if imported.contains(&CapabilityId::wasi_p1_v1()) {
+                return Err(LoadError::ThreadModule(
+                    "`orbit:thread/v1` cannot be combined with `wasi_snapshot_preview1` (the WASI \
+                     shim keeps per-instance state)"
+                        .into(),
+                ));
+            }
+            let start_ok = module.exports().any(|e| {
+                e.name() == THREAD_START_EXPORT
+                    && matches!(e.ty(), ExternType::Func(f)
+                        if f.params().len() == 2
+                            && f.params().all(|p| matches!(p, ValType::I64))
+                            && f.results().len() == 0)
+            });
+            if !start_ok {
+                return Err(LoadError::ThreadModule(format!(
+                    "`orbit:thread/v1` needs an export `{THREAD_START_EXPORT}` of type (i64, i64) -> ()"
+                )));
+            }
+        }
+        scan_memory_use(&wasm, threaded)?;
 
         let manifest = match info.manifest_sections.as_slice() {
             [] => None,
@@ -277,9 +390,14 @@ impl Artifact {
                 linked.push(Arc::clone(cap));
             }
         }
-        let pre = linker
-            .instantiate_pre(&module)
-            .map_err(|e| LoadError::Link(format!("{e:#}")))?;
+        let (pre, linker) = if shared_memory.is_some() {
+            (None, Some(linker))
+        } else {
+            let pre = linker
+                .instantiate_pre(&module)
+                .map_err(|e| LoadError::Link(format!("{e:#}")))?;
+            (Some(pre), None)
+        };
 
         Ok(Self {
             hash: info.hash,
@@ -289,6 +407,8 @@ impl Artifact {
             required,
             imported,
             pre,
+            linker,
+            shared_memory,
             linked,
         })
     }
@@ -329,8 +449,19 @@ impl Artifact {
         &self.imported
     }
 
-    pub(crate) fn pre(&self) -> &InstancePre<HostState> {
-        &self.pre
+    pub(crate) fn pre(&self) -> Option<&InstancePre<HostState>> {
+        self.pre.as_ref()
+    }
+
+    pub(crate) fn linker(&self) -> Option<&Linker<HostState>> {
+        self.linker.as_ref()
+    }
+
+    /// The shared memory the module imports as `env.memory`, if it is a threaded module (it
+    /// then runs on a memory Orbit creates per isolate; see `docs/host-abi.md` section 4e).
+    #[must_use]
+    pub fn shared_memory(&self) -> Option<SharedMemoryDecl> {
+        self.shared_memory
     }
 
     pub(crate) fn linked(&self) -> &[Arc<dyn Capability>] {

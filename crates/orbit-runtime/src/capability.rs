@@ -95,6 +95,23 @@ pub trait Capability: Send + Sync + 'static {
         config: &serde_json::Value,
     ) -> Box<dyn Any + Send>;
 
+    /// Creates the state of this capability for one more guest thread of an isolate
+    /// (`orbit:thread/v1`), given the state `parent` of the thread that spawns it.
+    ///
+    /// **Capabilities whose state is a resource of the isolate (handles, quotas, budgets)
+    /// must override this and return a value that shares that state with `parent`** (an `Arc`
+    /// inside the state type, see `orbit:net/v1`). The default creates a fresh, independent
+    /// state with [`instance_state`](Capability::instance_state): every thread then has its
+    /// own handle table and budgets, which is only right for stateless capabilities.
+    fn thread_state(
+        &self,
+        _parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        self.instance_state(info, config)
+    }
+
     /// Called before every invocation (including initialisation); reset per-invocation
     /// budgets here.
     fn begin_invocation(&self, _state: &mut (dyn Any + Send)) {}

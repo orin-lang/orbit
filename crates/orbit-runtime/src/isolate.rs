@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use orbit_abi::{CapabilityId, INIT_EXPORT, INITIALIZE_EXPORT, MEMORY_EXPORT};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use wasmtime::{Func, Instance, Memory, Store, Trap, UpdateDeadline, Val, ValType};
+use wasmtime::{Func, Instance, Memory, MemoryType, SharedMemory, Store, Trap, Val, ValType};
 
 use crate::IsolateState;
 use crate::artifact::Artifact;
@@ -16,6 +16,7 @@ use crate::host::HostState;
 use crate::lifecycle::Lifecycle;
 use crate::limits::Limits;
 use crate::runtime::MemoryReservation;
+use crate::threads::{ThreadParams, ThreadShared, epoch_callback, max_threads_of};
 
 /// Measurements of one finished invocation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -57,9 +58,13 @@ pub struct IsolateMetrics {
     pub memory_grow_denied: u64,
     /// `table.grow` requests refused by `Limits::max_table_elements` (exact).
     pub table_grow_denied: u64,
-    /// Host function calls per capability (exact).
+    /// Host function calls per capability (exact), including those of guest threads that have
+    /// finished.
     pub host_calls: HashMap<CapabilityId, u64>,
-    /// Bytes accepted by the log capability (exact).
+    /// Guest threads started with `orbit:thread/v1` over the isolate's life (exact; 0 for a
+    /// module without threads).
+    pub threads_spawned: u64,
+    /// Bytes accepted by the log capability (exact), including finished guest threads.
     pub bytes_logged: u64,
 }
 
@@ -87,6 +92,8 @@ pub struct Isolate {
     store: Option<Store<HostState>>,
     instance: Option<Instance>,
     memory: Option<Memory>,
+    /// Thread state of a module with a shared memory; `None` for ordinary modules.
+    threads: Option<Arc<ThreadShared>>,
     caps: Vec<Arc<dyn Capability>>,
     limits: Limits,
     metered: bool,
@@ -137,18 +144,63 @@ impl Isolate {
 
         let mut store = Store::new(engine.wasmtime(), host);
         store.limiter(|h| &mut h.limiter);
-        store.epoch_deadline_callback(|ctx| {
-            // Runs on every epoch tick: enforce the absolute deadline, otherwise yield to
-            // the executor so one isolate cannot monopolise a worker thread.
-            match ctx.data().deadline {
-                Some(d) if Instant::now() >= d => Ok(UpdateDeadline::Interrupt),
-                _ => Ok(UpdateDeadline::Yield(1)),
-            }
-        });
+        // Runs on every epoch tick: enforce the absolute deadline and termination, otherwise
+        // yield to the executor so one isolate cannot monopolise a worker thread.
+        store.epoch_deadline_callback(epoch_callback);
         arm(&mut store, &limits, metered)
             .map_err(|e| InstantiateError::Instantiate(format!("{e:#}")))?;
 
-        let instantiated = artifact.pre().instantiate_async(&mut store).await;
+        // A module that imports a shared memory runs on one Orbit creates for this isolate.
+        let mut threads = None;
+        let pre = match (artifact.shared_memory(), artifact.linker()) {
+            (Some(decl), Some(linker)) => {
+                let limit_pages = limits.max_memory_bytes / 65_536;
+                let max = decl.max_pages.min(limit_pages);
+                if decl.min_pages > max {
+                    return Err(InstantiateError::ResourceLimit(format!(
+                        "the module's initial shared memory of {} page(s) exceeds the limit of {limit_pages} page(s)",
+                        decl.min_pages
+                    )));
+                }
+                let (Ok(min32), Ok(max32)) = (u32::try_from(decl.min_pages), u32::try_from(max))
+                else {
+                    return Err(InstantiateError::ResourceLimit(
+                        "shared memory size does not fit 32 bits".into(),
+                    ));
+                };
+                let memory = SharedMemory::new(engine.wasmtime(), MemoryType::shared(min32, max32))
+                    .map_err(|e| InstantiateError::ResourceLimit(format!("{e:#}")))?;
+                let mut linker = linker.clone();
+                linker
+                    .define(&store, "env", "memory", memory.clone())
+                    .map_err(|e| InstantiateError::Instantiate(format!("{e:#}")))?;
+                let pre = linker
+                    .instantiate_pre(artifact.module())
+                    .map_err(|e| InstantiateError::Instantiate(format!("{e:#}")))?;
+                let shared = ThreadShared::new(ThreadParams {
+                    memory: memory.clone(),
+                    engine: engine.wasmtime().clone(),
+                    pre: pre.clone(),
+                    caps: artifact.linked().to_vec(),
+                    info: info.clone(),
+                    limits: limits.clone(),
+                    metered,
+                    max_threads: max_threads_of(grants),
+                    grace: engine.tick().saturating_mul(3),
+                });
+                let host = store.data_mut();
+                host.threads = Some(Arc::clone(&shared));
+                host.shared_memory = Some(memory);
+                threads = Some(shared);
+                pre
+            }
+            _ => artifact
+                .pre()
+                .expect("a module without a shared memory import is pre-linked")
+                .clone(),
+        };
+
+        let instantiated = pre.instantiate_async(&mut store).await;
         let fuel_used = if metered {
             limits
                 .fuel
@@ -188,6 +240,7 @@ impl Isolate {
             store: Some(store),
             memory,
             instance: Some(instance),
+            threads,
             caps: artifact.linked().to_vec(),
             limits,
             metered,
@@ -454,7 +507,7 @@ impl Isolate {
             self.metered,
         );
         let result = if armed.is_ok() {
-            self.call(func, &[]).await.ok()
+            self.call_direct(func, &[]).await.ok()
         } else {
             None
         };
@@ -489,6 +542,9 @@ impl Isolate {
         // Live states can always move to Stopping and then Terminated.
         let _ = self.state.transition(IsolateState::Stopping);
         self.final_metrics = Some(self.metrics());
+        if let Some(t) = self.threads.take() {
+            t.terminate(None);
+        }
         self.instance = None;
         self.memory = None;
         self.store = None;
@@ -507,9 +563,32 @@ impl Isolate {
         if let Some(m) = &self.final_metrics {
             return m.clone();
         }
-        let store = self.store.as_ref().expect("live isolate has a store");
+        let Some(store) = self.store.as_ref() else {
+            // The store is away on a guest thread (an invocation is running) or lost.
+            return IsolateMetrics {
+                state: self.state(),
+                fuel_consumed: self.metered.then_some(self.fuel_total),
+                last_invocation: self.last,
+                invocations: self.invocations,
+                instantiation_latency: self.instantiation_latency,
+                memory_bytes: self.threads.as_ref().map_or(0, |t| t.memory.data_size() as u64),
+                peak_memory_bytes: 0,
+                memory_grow_denied: 0,
+                table_grow_denied: 0,
+                host_calls: HashMap::new(),
+                threads_spawned: self.threads.as_ref().map_or(0, |t| t.spawned()),
+                bytes_logged: 0,
+            };
+        };
         let host = store.data();
-        let mem_export = self.memory.map(|m| m.data_size(store) as u64);
+        let mem_export = match (&self.threads, self.memory) {
+            (Some(t), _) => Some(t.memory.data_size() as u64),
+            (None, m) => m.map(|m| m.data_size(store) as u64),
+        };
+        let mut merged = host.metrics().clone();
+        if let Some(t) = &self.threads {
+            merged.merge(&t.thread_metrics());
+        }
         IsolateMetrics {
             state: self.state(),
             fuel_consumed: self.metered.then_some(self.fuel_total),
@@ -520,8 +599,9 @@ impl Isolate {
             peak_memory_bytes: host.limiter.peak_memory_bytes.max(mem_export.unwrap_or(0)),
             memory_grow_denied: host.limiter.memory_grow_denied,
             table_grow_denied: host.limiter.table_grow_denied,
-            host_calls: host.metrics().calls.clone(),
-            bytes_logged: host.metrics().bytes_logged,
+            host_calls: merged.calls,
+            threads_spawned: self.threads.as_ref().map_or(0, |t| t.spawned()),
+            bytes_logged: merged.bytes_logged,
         }
     }
 
@@ -574,6 +654,22 @@ impl Isolate {
     }
 
     async fn call(&mut self, func: Func, params: &[Val]) -> wasmtime::Result<Vec<Val>> {
+        let Some(threads) = self.threads.clone() else {
+            return self.call_direct(func, params).await;
+        };
+        // A threaded isolate runs its main thread on a dedicated OS thread (a wait on shared
+        // memory blocks it) and returns when every thread of the run is gone.
+        let store = self
+            .store
+            .take()
+            .ok_or_else(|| wasmtime::Error::msg("the isolate lost its store"))?;
+        let (store, result) = threads.run_main(store, func, params.to_vec()).await;
+        self.store = store;
+        result
+    }
+
+    /// Calls on the caller's task, without the thread machinery.
+    async fn call_direct(&mut self, func: Func, params: &[Val]) -> wasmtime::Result<Vec<Val>> {
         let store = self.store.as_mut().expect("live isolate has a store");
         let mut results = vec![Val::I32(0); func.ty(&*store).results().len()];
         func.call_async(&mut *store, params, &mut results).await?;
@@ -581,24 +677,7 @@ impl Isolate {
     }
 
     fn classify(&self, e: &wasmtime::Error, denied_before: u64) -> ExecError {
-        if let Some(GuestExit(code)) = e.downcast_ref::<GuestExit>() {
-            return ExecError::Exit(*code);
-        }
-        match e.downcast_ref::<Trap>() {
-            Some(Trap::OutOfFuel) => ExecError::OutOfFuel,
-            Some(Trap::Interrupt) => ExecError::DeadlineExceeded,
-            _ => {
-                let denied = self.denied_total().saturating_sub(denied_before);
-                if denied > 0 {
-                    ExecError::MemoryLimit {
-                        denied,
-                        trap: format!("{e:#}"),
-                    }
-                } else {
-                    ExecError::Trap(format!("{e:#}"))
-                }
-            }
-        }
+        classify_error(e, self.denied_total().saturating_sub(denied_before))
     }
 
     /// Records measurements and performs the post-run state transition.
@@ -610,7 +689,9 @@ impl Isolate {
         ok_state: IsolateState,
         count: bool,
     ) -> Result<(), ExecError> {
-        let consumed = fuel_before.saturating_sub(self.fuel_now());
+        let consumed = fuel_before
+            .saturating_sub(self.fuel_now())
+            .saturating_add(self.threads.as_ref().map_or(0, |t| t.take_fuel()));
         self.fuel_total = self.fuel_total.saturating_add(consumed);
         self.last = Some(InvocationMetrics {
             fuel_consumed: self.metered.then_some(consumed),
@@ -670,6 +751,36 @@ fn arm_with(
     store.data_mut().deadline = timeout.map(|t| Instant::now() + t);
     store.set_epoch_deadline(1);
     Ok(())
+}
+
+/// Maps a Wasmtime error to the isolate's error type. `denied` is the number of resource
+/// growth requests refused during the failing invocation.
+pub(crate) fn classify_error(e: &wasmtime::Error, denied: u64) -> ExecError {
+    if let Some(done) = e.downcast_ref::<ExecError>() {
+        // A failure of another guest thread, already classified.
+        return done.clone();
+    }
+    if let Some(GuestExit(code)) = e.downcast_ref::<GuestExit>() {
+        return ExecError::Exit(*code);
+    }
+    match e.downcast_ref::<Trap>() {
+        Some(Trap::OutOfFuel) => ExecError::OutOfFuel,
+        Some(Trap::Interrupt) => ExecError::DeadlineExceeded,
+        _ if denied > 0 => ExecError::MemoryLimit {
+            denied,
+            trap: format!("{e:#}"),
+        },
+        _ => ExecError::Trap(format!("{e:#}")),
+    }
+}
+
+impl Drop for Isolate {
+    fn drop(&mut self) {
+        // Never leave guest threads running after their isolate is gone.
+        if let Some(t) = &self.threads {
+            t.terminate(None);
+        }
+    }
 }
 
 impl std::fmt::Debug for Isolate {

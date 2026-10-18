@@ -158,6 +158,9 @@ impl OrbitEngine {
         c.consume_fuel(config.fuel_metering);
         c.epoch_interruption(true);
         c.wasm_memory64(true);
+        // Guest threads (`orbit:thread/v1`): atomics, and shared memories that Orbit creates.
+        c.wasm_threads(true);
+        c.shared_memory(true);
         if let Some(p) = &config.pooling {
             let mut pc = PoolingAllocationConfig::default();
             pc.total_core_instances(p.max_instances);

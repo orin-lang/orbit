@@ -26,4 +26,5 @@ pub use process::{
     HostStdin, MemoryStdin, ProcessCapability, ProcessGrant, StdinError, StdinProvider, StdinReader,
 };
 pub use random::RandomCapability;
+pub use orbit_runtime::ThreadCapability;
 pub use wasi::WasiCapability;

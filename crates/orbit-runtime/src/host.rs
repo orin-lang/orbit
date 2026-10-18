@@ -2,13 +2,15 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use orbit_abi::{CapabilityId, MEMORY_EXPORT, status};
-use wasmtime::{Caller, ResourceLimiter};
+use wasmtime::{Caller, ResourceLimiter, SharedMemory};
 
 use crate::Limits;
 use crate::capability::{InstanceId, InstanceInfo, TenantId};
+use crate::threads::ThreadShared;
 
 /// Counters kept by the host while an isolate runs. All values are exact counts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,6 +20,16 @@ pub struct HostMetrics {
     /// Bytes accepted by `orbit:log/v1` and by the WASI shim's stdout/stderr (rejected
     /// messages are not counted).
     pub bytes_logged: u64,
+}
+
+impl HostMetrics {
+    /// Adds the counters of `other` (the metrics of a finished guest thread) to these.
+    pub(crate) fn merge(&mut self, other: &HostMetrics) {
+        for (id, n) in &other.calls {
+            *self.calls.entry(id.clone()).or_insert(0) += n;
+        }
+        self.bytes_logged = self.bytes_logged.saturating_add(other.bytes_logged);
+    }
 }
 
 /// `ResourceLimiter` of an isolate: memory, table and instance limits plus accounting.
@@ -98,6 +110,14 @@ pub struct HostState {
     metrics: HostMetrics,
     /// Absolute deadline of the running invocation, checked by the epoch callback.
     pub(crate) deadline: Option<Instant>,
+    /// The isolate's thread state (`Some` for a module that imports a shared memory).
+    pub(crate) threads: Option<Arc<ThreadShared>>,
+    /// The shared linear memory the host functions read and write instead of an exported
+    /// `memory` (same value as `threads.memory`).
+    pub(crate) shared_memory: Option<SharedMemory>,
+    /// Whether the epoch callback ends this store when the isolate is terminating. `false`
+    /// for the main store outside an invocation (the post-mortem export must be able to run).
+    pub(crate) observe_termination: bool,
 }
 
 impl HostState {
@@ -108,6 +128,9 @@ impl HostState {
             caps: HashMap::new(),
             metrics: HostMetrics::default(),
             deadline: None,
+            threads: None,
+            shared_memory: None,
+            observe_termination: false,
         }
     }
 
@@ -184,14 +207,36 @@ fn range(mem_len: usize, ptr: i64, len: i64) -> Result<std::ops::Range<usize>, i
     Ok(ptr as usize..end as usize)
 }
 
-fn guest_memory(caller: &mut Caller<'_, HostState>) -> Result<wasmtime::Memory, i32> {
+/// The guest's linear memory as the host functions see it: an exported plain `memory`, or the
+/// shared memory the isolate provided to a threaded module.
+enum GuestMem {
+    Plain(wasmtime::Memory),
+    Shared(SharedMemory),
+}
+
+fn guest_memory(caller: &mut Caller<'_, HostState>) -> Result<GuestMem, i32> {
+    if let Some(m) = &caller.data().shared_memory {
+        return Ok(GuestMem::Shared(m.clone()));
+    }
     caller
         .get_export(MEMORY_EXPORT)
         .and_then(wasmtime::Extern::into_memory)
+        .map(GuestMem::Plain)
         .ok_or(status::ERR_INVALID)
 }
 
-/// Copies `len` bytes at `ptr` out of the guest's exported `memory`.
+impl GuestMem {
+    /// Current size in bytes.
+    fn len(&self, caller: &Caller<'_, HostState>) -> usize {
+        match self {
+            GuestMem::Plain(m) => m.data_size(caller),
+            GuestMem::Shared(m) => m.data_size(),
+        }
+    }
+}
+
+/// Copies `len` bytes at `ptr` out of the guest's memory (the exported `memory`, or the shared
+/// memory of a threaded module).
 ///
 /// Works for 32-bit and 64-bit memories. All arithmetic is checked against the memory's
 /// size *at the time of the call*.
@@ -199,7 +244,7 @@ fn guest_memory(caller: &mut Caller<'_, HostState>) -> Result<wasmtime::Memory, 
 /// # Errors
 /// * [`status::ERR_TOO_LARGE`] if `len > max` (checked first, before touching memory);
 /// * [`status::ERR_INVALID`] for a negative `ptr`/`len`, an overflowing or out-of-bounds
-///   range, or a guest without an exported `memory`.
+///   range, or a guest without a memory.
 pub fn read_guest_bytes(
     caller: &mut Caller<'_, HostState>,
     ptr: i64,
@@ -210,14 +255,27 @@ pub fn read_guest_bytes(
         return Err(status::ERR_TOO_LARGE);
     }
     let mem = guest_memory(caller)?;
-    let data = mem.data(&*caller);
-    let r = range(data.len(), ptr, len)?;
-    Ok(data[r].to_vec())
+    match mem {
+        GuestMem::Plain(m) => {
+            let data = m.data(&*caller);
+            let r = range(data.len(), ptr, len)?;
+            Ok(data[r].to_vec())
+        }
+        GuestMem::Shared(m) => {
+            let r = range(m.data_size(), ptr, len)?;
+            let mut out = vec![0u8; r.len()];
+            if crate::shared_mem::read(&m, r.start, &mut out) {
+                Ok(out)
+            } else {
+                Err(status::ERR_INVALID)
+            }
+        }
+    }
 }
 
-/// Checks that `(ptr, len)` lies inside the guest's exported `memory` right now, without
-/// copying anything. Long-running host functions call it *before* they wait or consume
-/// input, so a bad output pointer is refused while nothing has happened yet.
+/// Checks that `(ptr, len)` lies inside the guest's memory right now, without copying
+/// anything. Long-running host functions call it *before* they wait or consume input, so a
+/// bad output pointer is refused while nothing has happened yet.
 ///
 /// # Errors
 /// [`status::ERR_INVALID`] as for [`read_guest_bytes`].
@@ -227,28 +285,37 @@ pub fn check_guest_range(
     len: i64,
 ) -> Result<(), i32> {
     let mem = guest_memory(caller)?;
-    range(mem.data_size(&*caller), ptr, len).map(|_| ())
+    range(mem.len(caller), ptr, len).map(|_| ())
 }
 
-/// Copies `bytes` into the guest's exported `memory` at `ptr`.
+/// Copies `bytes` into the guest's memory at `ptr`.
 ///
 /// # Errors
 /// [`status::ERR_INVALID`] for a negative `ptr`, an overflowing or out-of-bounds range, or a
-/// guest without an exported `memory`.
+/// guest without a memory.
 pub fn write_guest_bytes(
     caller: &mut Caller<'_, HostState>,
     ptr: i64,
     bytes: &[u8],
 ) -> Result<(), i32> {
     let mem = guest_memory(caller)?;
-    let data = mem.data_mut(&mut *caller);
-    let r = range(
-        data.len(),
-        ptr,
-        i64::try_from(bytes.len()).map_err(|_| status::ERR_INVALID)?,
-    )?;
-    data[r].copy_from_slice(bytes);
-    Ok(())
+    let len = i64::try_from(bytes.len()).map_err(|_| status::ERR_INVALID)?;
+    match mem {
+        GuestMem::Plain(m) => {
+            let data = m.data_mut(&mut *caller);
+            let r = range(data.len(), ptr, len)?;
+            data[r].copy_from_slice(bytes);
+            Ok(())
+        }
+        GuestMem::Shared(m) => {
+            let r = range(m.data_size(), ptr, len)?;
+            if crate::shared_mem::write(&m, r.start, bytes) {
+                Ok(())
+            } else {
+                Err(status::ERR_INVALID)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

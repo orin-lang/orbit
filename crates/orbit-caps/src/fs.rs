@@ -17,7 +17,7 @@ use std::any::Any;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions, ReadDir};
@@ -231,7 +231,11 @@ enum DirIter {
     Virtual(std::vec::IntoIter<String>),
 }
 
-struct FsState {
+/// The state of one isolate's fs capability. Guest threads of one isolate share it (one handle
+/// table, one quota); every call holds the lock, so fs calls of an isolate are serialised.
+struct FsState(Arc<Mutex<FsInner>>);
+
+struct FsInner {
     mounts: Vec<Mount>,
     cwd: Vec<String>,
     handles: HandleTable<OpenEntry>,
@@ -251,7 +255,7 @@ enum Place<'a> {
     Outside,
 }
 
-impl FsState {
+impl FsInner {
     fn locate(&self, comps: &[String]) -> Place<'_> {
         for m in &self.mounts {
             if comps.len() >= m.guest.len() && comps[..m.guest.len()] == m.guest[..] {
@@ -303,8 +307,14 @@ fn map_io(e: &io::Error) -> i32 {
     }
 }
 
-fn state<'a>(host: &'a mut HostState, id: &CapabilityId) -> Result<&'a mut FsState, i32> {
-    host.cap_state_mut::<FsState>(id).ok_or(status::ERR_IO)
+fn state(host: &mut HostState, id: &CapabilityId) -> Result<Arc<Mutex<FsInner>>, i32> {
+    host.cap_state_mut::<FsState>(id)
+        .map(|s| Arc::clone(&s.0))
+        .ok_or(status::ERR_IO)
+}
+
+fn lock(m: &Mutex<FsInner>) -> MutexGuard<'_, FsInner> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn read_path(caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> Result<String, i32> {
@@ -320,18 +330,7 @@ fn read_path(caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> Result<S
 
 /// Checks that `(ptr, len)` is writable guest memory without writing.
 pub(crate) fn check_out(caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> Result<(), i32> {
-    let (Ok(p), Ok(l)) = (u64::try_from(ptr), u64::try_from(len)) else {
-        return Err(status::ERR_INVALID);
-    };
-    let mem = caller
-        .get_export(orbit_abi::MEMORY_EXPORT)
-        .and_then(wasmtime::Extern::into_memory)
-        .ok_or(status::ERR_INVALID)?;
-    let size = mem.data_size(&*caller) as u64;
-    match p.checked_add(l) {
-        Some(end) if end <= size => Ok(()),
-        _ => Err(status::ERR_INVALID),
-    }
+    orbit_runtime::check_guest_range(caller, ptr, len)
 }
 
 fn ok_len(n: usize) -> i64 {
@@ -388,10 +387,11 @@ fn open(
         Ok(p) => p,
         Err(c) => return c.into(),
     };
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c.into(),
     };
+    let mut st = lock(&sh);
     if st.handles.len() >= st.handle_limit {
         return status::ERR_QUOTA.into();
     }
@@ -430,7 +430,7 @@ fn open(
 fn read(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64, cap: i64) -> i64 {
     caller.data_mut().record_call(id);
     match state(caller.data_mut(), id) {
-        Ok(st) => match st.handles.get(h) {
+        Ok(sh) => match lock(&sh).handles.get(h) {
             Some(OpenEntry::File { read: true, .. }) => {}
             Some(_) => return status::ERR_INVALID.into(),
             None => return status::ERR_BAD_HANDLE.into(),
@@ -446,9 +446,10 @@ fn read(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64,
     }
     let mut buf = vec![0u8; n];
     let got = {
-        let Ok(st) = state(caller.data_mut(), id) else {
+        let Ok(sh) = state(caller.data_mut(), id) else {
             return status::ERR_IO.into();
         };
+        let mut st = lock(&sh);
         let Some(OpenEntry::File { file, .. }) = st.handles.get_mut(h) else {
             return status::ERR_BAD_HANDLE.into();
         };
@@ -466,7 +467,7 @@ fn read(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64,
 fn write(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64, len: i64) -> i64 {
     caller.data_mut().record_call(id);
     match state(caller.data_mut(), id) {
-        Ok(st) => match st.handles.get(h) {
+        Ok(sh) => match lock(&sh).handles.get(h) {
             Some(OpenEntry::File { write: true, .. }) => {}
             Some(_) => return status::ERR_INVALID.into(),
             None => return status::ERR_BAD_HANDLE.into(),
@@ -481,9 +482,10 @@ fn write(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64
         Ok(d) => d,
         Err(c) => return c.into(),
     };
-    let Ok(st) = state(caller.data_mut(), id) else {
+    let Ok(sh) = state(caller.data_mut(), id) else {
         return status::ERR_IO.into();
     };
+    let mut st = lock(&sh);
     if let Some(max) = st.max_write_bytes
         && st.written.saturating_add(n) > max
     {
@@ -503,10 +505,11 @@ fn write(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64, ptr: i64
 
 fn flush(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
     caller.data_mut().record_call(id);
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c,
     };
+    let mut st = lock(&sh);
     match st.handles.get_mut(h) {
         Some(OpenEntry::File { file, write, .. }) => {
             if *write && let Err(e) = file.flush() {
@@ -521,10 +524,11 @@ fn flush(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
 
 fn close(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
     caller.data_mut().record_call(id);
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c,
     };
+    let mut st = lock(&sh);
     if st.handles.remove(h).is_some() {
         status::OK
     } else {
@@ -541,7 +545,8 @@ fn stat_of(
 ) -> Result<(i32, u64), i32> {
     caller.data_mut().record_call(id);
     let path = read_path(caller, ptr, len)?;
-    let st = state(caller.data_mut(), id)?;
+    let sh = state(caller.data_mut(), id)?;
+    let st = lock(&sh);
     let (found, _v) = {
         let comps = normalize(&st.cwd, &path);
         match st.locate(&comps) {
@@ -583,10 +588,11 @@ fn dir_open(id: &CapabilityId, caller: &mut Caller<'_, HostState>, ptr: i64, len
         Ok(p) => p,
         Err(c) => return c.into(),
     };
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c.into(),
     };
+    let mut st = lock(&sh);
     if st.handles.len() >= st.handle_limit {
         return status::ERR_QUOTA.into();
     }
@@ -615,10 +621,11 @@ fn dir_next(
     cap: i64,
 ) -> i64 {
     caller.data_mut().record_call(id);
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c.into(),
     };
+    let mut st = lock(&sh);
     let Some(entry) = st.handles.get_mut(h) else {
         return status::ERR_BAD_HANDLE.into();
     };
@@ -660,8 +667,8 @@ fn dir_next(
     let flag = if is_dir { FS_DIR_FLAG } else { 0 };
     let r = put_string(caller, &name, ptr, cap, flag);
     if r >= 0
-        && let Ok(st) = state(caller.data_mut(), id)
-        && let Some(OpenEntry::Dir { pending, .. }) = st.handles.get_mut(h)
+        && let Ok(sh) = state(caller.data_mut(), id)
+        && let Some(OpenEntry::Dir { pending, .. }) = lock(&sh).handles.get_mut(h)
     {
         *pending = None;
     }
@@ -681,10 +688,11 @@ fn realpath(
         Ok(p) => p,
         Err(c) => return c.into(),
     };
-    let st = match state(caller.data_mut(), id) {
+    let sh = match state(caller.data_mut(), id) {
         Ok(s) => s,
         Err(c) => return c.into(),
     };
+    let st = lock(&sh);
     let comps = normalize(&st.cwd, &path);
     let text = match st.locate(&comps) {
         Place::Outside => return status::ERR_DENIED.into(),
@@ -748,7 +756,7 @@ fn is_not_dir(e: &io::Error) -> bool {
 fn cwd(id: &CapabilityId, caller: &mut Caller<'_, HostState>, out: i64, cap: i64) -> i64 {
     caller.data_mut().record_call(id);
     let text = match state(caller.data_mut(), id) {
-        Ok(st) => join(&st.cwd),
+        Ok(sh) => join(&lock(&sh).cwd),
         Err(c) => return c.into(),
     };
     put_string(caller, &text, out, cap, 0)
@@ -829,13 +837,26 @@ impl Capability for FsCapability {
                 writable: m.writable,
             })
             .collect::<Vec<_>>();
-        Box::new(FsState {
+        Box::new(FsState(Arc::new(Mutex::new(FsInner {
             mounts,
             cwd: cfg.cwd,
             handles: HandleTable::new(info.instance_id.0, cfg.max_handles),
             handle_limit: cfg.max_handles,
             written: 0,
             max_write_bytes: cfg.max_write_bytes,
-        })
+        }))))
+    }
+
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        // One handle table, one write quota and one cwd for the whole isolate.
+        match parent.downcast_ref::<FsState>() {
+            Some(s) => Box::new(FsState(Arc::clone(&s.0))),
+            None => self.instance_state(info, config),
+        }
     }
 }

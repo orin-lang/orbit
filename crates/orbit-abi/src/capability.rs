@@ -196,6 +196,14 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         wasm32_only: false,
     },
     CapabilitySpec {
+        name: "thread",
+        major: 1,
+        // spawn(arg) -> tid > 0 or a negative status. It touches no guest memory.
+        funcs: &[sig("spawn", &[I64], &[I64])],
+        module: None,
+        wasm32_only: true,
+    },
+    CapabilitySpec {
         name: "wasi_p1",
         major: 1,
         funcs: WASI_P1_FUNCS,
@@ -331,6 +339,11 @@ impl CapabilityId {
     #[must_use]
     pub fn process_v1() -> Self {
         Self::new("process", 1)
+    }
+    /// `orbit:thread/v1`.
+    #[must_use]
+    pub fn thread_v1() -> Self {
+        Self::new("thread", 1)
     }
 
     /// Capability name, e.g. `log`.
@@ -468,7 +481,7 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 8);
+        assert_eq!(CAPABILITIES.len(), 9);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
     }
 
