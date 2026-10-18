@@ -54,6 +54,7 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -14 | `ERR_IS_DIR` | the path names a directory where a file is needed |
 | -15 | `ERR_REFUSED` | the peer refused the connection (net `tcp_connect`) |
 | -16 | `ERR_ADDR_IN_USE` | the address is already in use (net `tcp_listen`) |
+| -17 | `ERR_NOT_EMPTY` | the directory is not empty (fs `remove_dir`, `rename` onto a directory) |
 
 ## 4. Capabilities in version 1
 
@@ -169,7 +170,15 @@ dir_next(h: i64, out_ptr: i64, out_cap: i64) -> i64      // name length | 0x4000
 dir_close(h: i64) -> i32
 realpath(path_ptr: i64, path_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length of the virtual canonical path
 cwd(out_ptr: i64, out_cap: i64) -> i64                   // length of the virtual working directory (absolute)
+sync(h: i64) -> i32                                      // flush a write handle's data to stable storage (fsync)
+rename(from_ptr: i64, from_len: i64, to_ptr: i64, to_len: i64) -> i32   // replaces an existing `to` atomically
+remove_file(path_ptr: i64, path_len: i64) -> i32         // a file or symbolic link, never a directory
+remove_dir(path_ptr: i64, path_len: i64) -> i32          // an empty directory
 ```
+
+`sync`, `rename`, `remove_file` and `remove_dir` were added to v1 (section 1: functions may be added) so that Orin's
+`std:fs` `rename`, `removeFile`, `removeDir` and `writeFileAtomic` run unchanged; a guest that imports them needs a host
+that has them.
 
 **Authority is the mounts in the grant.** A mount binds a virtual absolute path to a host directory, read-only or
 read-write. CLI: `--grant fs:/data=./hostdir:ro` (`:rw` for write; read-only if the suffix is omitted; repeatable,
@@ -205,6 +214,16 @@ mount names, `open` is `ERR_IS_DIR`.
 * `realpath`: the longest existing prefix with symlinks resolved, then the non-existing rest unchanged; the result is a
   **virtual** path (never a host path). `ERR_NOT_FOUND` if the first missing component is a dangling symlink, `ERR_DENIED`
   for an escaping link.
+* `rename`, `remove_file`, `remove_dir` act on the **name**: the last component is not followed, so a symbolic link is
+  renamed or removed itself and its target is untouched; the directory part is confined like every other path (a link
+  that leaves the mount is `ERR_DENIED`). Every path must lie in a **read-write** mount and must not be the mount itself
+  or a virtual ancestor (`ERR_DENIED`, before any OS call). Both `rename` paths must be in the **same** mount; across
+  mounts it is `ERR_IO`, like `EXDEV` across file systems. An existing `to` is replaced atomically (POSIX `rename`); a
+  non-empty directory at `to` is `ERR_NOT_EMPTY`. `remove_file` on a directory is `ERR_IS_DIR` on every host;
+  `remove_dir` on a file or link is `ERR_NOT_DIR`, on a non-empty directory `ERR_NOT_EMPTY`.
+* `sync` calls `fsync` on a write handle; on a read handle it is a no-op (`OK`), on a directory handle `ERR_INVALID`.
+  An atomic replacement is `open(tmp, 1)`, `write` loop, `sync`, `close`, `rename(tmp, path)`; the rename is atomic, but
+  the directory entry itself is not synced (there is no directory `sync`).
 * Handles (files and directories) live in the per-instance `HandleTable`; a stale, forged or foreign handle is
   `ERR_BAD_HANDLE`; a handle of the wrong kind (`dir_next` on a file) is `ERR_INVALID`.
 

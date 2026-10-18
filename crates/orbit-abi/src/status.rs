@@ -36,6 +36,8 @@ pub const ERR_IS_DIR: i32 = -14;
 pub const ERR_REFUSED: i32 = -15;
 /// The address is already in use (`orbit:net/v1` `tcp_listen`; native `EADDRINUSE`).
 pub const ERR_ADDR_IN_USE: i32 = -16;
+/// The directory is not empty (`orbit:fs/v1` `remove_dir`, `rename` onto a directory; native `ENOTEMPTY`).
+pub const ERR_NOT_EMPTY: i32 = -17;
 
 /// Symbolic name of a status code, for diagnostics.
 #[must_use]
@@ -58,6 +60,7 @@ pub fn name(code: i32) -> &'static str {
         ERR_IS_DIR => "ERR_IS_DIR",
         ERR_REFUSED => "ERR_REFUSED",
         ERR_ADDR_IN_USE => "ERR_ADDR_IN_USE",
+        ERR_NOT_EMPTY => "ERR_NOT_EMPTY",
         _ => "UNKNOWN",
     }
 }

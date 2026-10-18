@@ -13,7 +13,7 @@ imports are only the target of L0, the one layer of the Orin runtime that differ
 
 * Pointers and lengths are i64 (zero-extended on wasm32). Status values are fixed (host-abi.md section 3):
   `OK 0, ERR_INVALID -1, ERR_DENIED -2, ERR_NOT_FOUND -3, ERR_BAD_HANDLE -4, ERR_TOO_LARGE -5, ERR_QUOTA -6, ERR_IO -7,
-  ERR_EOF -8, ERR_TIMEOUT -9, ERR_RESET -10, ERR_CANCELLED -11, ERR_EXISTS -12, ERR_NOT_DIR -13, ERR_IS_DIR -14, ERR_REFUSED -15, ERR_ADDR_IN_USE -16`.
+  ERR_EOF -8, ERR_TIMEOUT -9, ERR_RESET -10, ERR_CANCELLED -11, ERR_EXISTS -12, ERR_NOT_DIR -13, ERR_IS_DIR -14, ERR_REFUSED -15, ERR_ADDR_IN_USE -16, ERR_NOT_EMPTY -17`.
 * A function returning i64 returns a value >= 0 (a handle is > 0) or one of those negative statuses.
 * An output buffer that is too small gives `ERR_TOO_LARGE` and nothing is written (grow and call again).
 * read, write, recv, send and stdin_read move at most 1 MiB per call; a short result is normal, L0 loops.
@@ -29,7 +29,7 @@ imports are only the target of L0, the one layer of the Orin runtime that differ
 | `std:process` env | getenv | `orbit:process/v1` env_get | `--env K=V`, `--env-pass K` | Orbit done, L0 pending |
 | `std:io` stdin | stdin_read, stdin_getc | `orbit:process/v1` stdin_read | `--grant process:stdin` | Orbit done, L0 pending |
 | `std:process` exit | exit, at_exit, abort | export `orin_exit_status` | none | done |
-| `std:fs` | file_read, file_write, file_exists, dir_list, stream_* | `orbit:fs/v1` | `--grant fs:/data=./dir:ro\|rw`, `--cwd` | Orbit done, L0 pending |
+| `std:fs` | file_read, file_write, file_exists, dir_list, stream_*, file_rename, file_remove, dir_remove, file_write_atomic | `orbit:fs/v1` | `--grant fs:/data=./dir:ro\|rw`, `--cwd` | Orbit done, L0 pending |
 | `std:path` | path_absolute, path_real | `orbit:fs/v1` cwd, realpath | (with fs) | Orbit done, L0 pending |
 | `std:net`, `std:http` | net_narrow, tcp_listen, tcp_accept, tcp_connect, stream_recv, stream_send, net_shutdown, net_close, dns_resolve | `orbit:net/v1` | `--grant net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen` | Orbit done, L0 pending |
 | `std:task` cancellation | wake_open, wake_close, wake_signal, wake_check, wake_bind, wake_bound | `orbit:net/v1` wake_* | (with net) | Orbit done, L0 pending |
@@ -53,6 +53,10 @@ dir_next(h, out_ptr, out_cap) -> i64           name length, bit 62 set for a dir
 dir_close(h) -> i32
 realpath(path_ptr, path_len, out_ptr, out_cap) -> i64   virtual path, never a host path
 cwd(out_ptr, out_cap) -> i64
+sync(h) -> i32                                 fsync of a write handle
+rename(from_ptr, from_len, to_ptr, to_len) -> i32       both in one read-write mount; replaces `to`
+remove_file(path_ptr, path_len) -> i32         a file or link, never a directory
+remove_dir(path_ptr, path_len) -> i32          an empty directory
 ```
 
 `orbit:process/v1` (section 4c):
@@ -96,6 +100,9 @@ threads (exported, unshared memory) stay valid and keep the run-on-block schedul
 ## L0 implementation notes
 
 * `file_read`: size, open(0), read until 0, close. `file_write`: open(1), write loop, flush, close; first error wins.
+* `file_rename`, `file_remove`, `dir_remove`: one call each. `file_write_atomic`: open(1) on a temporary name next to
+  the target (L0 picks it; on `ERR_EXISTS` try another), write loop, sync, close, rename over the target; on any error
+  remove_file the temporary and return that error.
 * `file_exists`: stat is 1 or 2. `dir_list`: dir_open, dir_next until 0 (grow the buffer on ERR_TOO_LARGE), dir_close.
 * `path_absolute`: cwd once, join, then L0's own normalize. `path_real`: realpath of the normalized path.
 * `arg`: call with cap 0 for the length, allocate once at init. `getenv`: ERR_NOT_FOUND gives NULL.
@@ -115,6 +122,7 @@ Status back to L0 codes:
 | `ERR_CANCELLED` -11 | `ORIN_PLATFORM_NET_CANCELLED` | not produced |
 | `ERR_NOT_FOUND` -3 | `ENOENT` (DNS miss) | `ENOENT` |
 | `ERR_NOT_DIR` -13, `ERR_IS_DIR` -14, `ERR_EXISTS` -12 | not produced | `ENOTDIR`, `EISDIR`, `EEXIST` |
+| `ERR_NOT_EMPTY` -17 | not produced | `ENOTEMPTY` |
 | `ERR_INVALID` -1 | `EINVAL` | `EINVAL` |
 | `ERR_TOO_LARGE` -5 | grow and retry | `ENAMETOOLONG` for paths, else grow and retry |
 | `ERR_QUOTA` -6 | `EMFILE` | `EMFILE` (handles), `ENOSPC` (write quota) |
@@ -126,5 +134,5 @@ The host never returns error text; `orin_platform_error_message` stays in L0.
 
 ## Not available
 
-mkdir, remove, rename, chmod, processes (`shell`), UDP, TLS, and a poll over several sockets. A single-threaded guest
+mkdir, chmod, processes (`shell`), UDP, TLS, and a poll over several sockets. A single-threaded guest
 serves one connection at a time until `orbit:thread/v1` exists.
