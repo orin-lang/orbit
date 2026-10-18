@@ -52,6 +52,8 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -12 | `ERR_EXISTS` | the object already exists |
 | -13 | `ERR_NOT_DIR` | a path component is not a directory |
 | -14 | `ERR_IS_DIR` | the path names a directory where a file is needed |
+| -15 | `ERR_REFUSED` | the peer refused the connection (net `tcp_connect`) |
+| -16 | `ERR_ADDR_IN_USE` | the address is already in use (net `tcp_listen`) |
 
 ## 4. Capabilities in version 1
 
@@ -282,8 +284,9 @@ net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen A
 executor thread. A wait ends with the first of: success, `timeout_ms` (`ERR_TIMEOUT`), the wake source being set
 (`ERR_CANCELLED`, also when it was set before the call: that is checked first, so a cancelled task starts no new network
 work, and nothing is consumed), and the isolate's **remaining wall-clock deadline** (`Limits::timeout`; the call returns
-`ERR_TIMEOUT` and the epoch deadline then ends the guest). A reset connection is `ERR_RESET`; any other OS failure is
-`ERR_IO` (the exact errno is not exposed; ECONNREFUSED is `ERR_IO`). `dns_resolve` is bounded by 30 s and, like
+`ERR_TIMEOUT` and the epoch deadline then ends the guest). A reset connection is `ERR_RESET`, a refused connect
+`ERR_REFUSED`, a listen address already in use `ERR_ADDR_IN_USE`; any other OS failure is `ERR_IO` (no other errno is
+exposed). `dns_resolve` is bounded by 30 s and, like
 `getaddrinfo` in L0, is not interruptible by a wake source once started.
 
 **Wake sources** form a tree like L0's: a source opened under a parent is its child; signalling a parent sets every

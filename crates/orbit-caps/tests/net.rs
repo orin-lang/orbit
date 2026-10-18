@@ -258,9 +258,12 @@ async fn denied_without_scopes_and_outside_scopes() {
         call(&mut iso, "tcp_connect", &[48, 11, 443, 100, 0]).await,
         E(status::ERR_DENIED)
     ); // example.org itself
-    // In scope but refused by the OS (nothing listens on 9): an I/O error, not a denial.
+    // In scope but refused by the OS (nothing listens on 9): refused (or a timeout), not a denial.
     let r = call(&mut iso, "tcp_connect", &[0, 9, 9, 1000, 0]).await;
-    assert!(r == E(status::ERR_IO) || r == E(status::ERR_TIMEOUT), "{r}");
+    assert!(
+        r == E(status::ERR_REFUSED) || r == E(status::ERR_TIMEOUT),
+        "{r}"
+    );
 }
 
 #[tokio::test]
@@ -565,4 +568,30 @@ async fn peer_reset_and_dns() {
         call(&mut iso, "dns_resolve", &[32, 9, 8192, 3]).await,
         E(status::ERR_TOO_LARGE)
     );
+}
+
+#[tokio::test]
+async fn refused_connect_and_address_in_use() {
+    let rt = runtime();
+    let mut iso = spawn(&rt, &net_wat(false), &grants(loopback()), Limits::default()).await;
+    let (_l, port) = listen(&mut iso).await;
+    // A second listener on the same port (opt 0, no SO_REUSEADDR): EADDRINUSE.
+    assert_eq!(
+        call(&mut iso, "tcp_listen", &[0, 9, i64::from(port), 16, 0]).await,
+        E(status::ERR_ADDR_IN_USE)
+    );
+    // A port nobody listens on: ECONNREFUSED (Windows retries for about 2 s first).
+    let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed = free.local_addr().unwrap().port();
+    drop(free);
+    assert_eq!(
+        call(
+            &mut iso,
+            "tcp_connect",
+            &[0, 9, i64::from(closed), 10_000, 0]
+        )
+        .await,
+        E(status::ERR_REFUSED)
+    );
+    iso.terminate();
 }

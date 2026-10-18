@@ -32,6 +32,10 @@ pub const ERR_EXISTS: i32 = -12;
 pub const ERR_NOT_DIR: i32 = -13;
 /// The path names a directory where a file is needed.
 pub const ERR_IS_DIR: i32 = -14;
+/// The peer refused the connection (`orbit:net/v1` `tcp_connect`; native `ECONNREFUSED`).
+pub const ERR_REFUSED: i32 = -15;
+/// The address is already in use (`orbit:net/v1` `tcp_listen`; native `EADDRINUSE`).
+pub const ERR_ADDR_IN_USE: i32 = -16;
 
 /// Symbolic name of a status code, for diagnostics.
 #[must_use]
@@ -52,6 +56,8 @@ pub fn name(code: i32) -> &'static str {
         ERR_EXISTS => "ERR_EXISTS",
         ERR_NOT_DIR => "ERR_NOT_DIR",
         ERR_IS_DIR => "ERR_IS_DIR",
+        ERR_REFUSED => "ERR_REFUSED",
+        ERR_ADDR_IN_USE => "ERR_ADDR_IN_USE",
         _ => "UNKNOWN",
     }
 }

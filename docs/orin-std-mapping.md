@@ -13,7 +13,7 @@ imports are only the target of L0, the one layer of the Orin runtime that differ
 
 * Pointers and lengths are i64 (zero-extended on wasm32). Status values are fixed (host-abi.md section 3):
   `OK 0, ERR_INVALID -1, ERR_DENIED -2, ERR_NOT_FOUND -3, ERR_BAD_HANDLE -4, ERR_TOO_LARGE -5, ERR_QUOTA -6, ERR_IO -7,
-  ERR_EOF -8, ERR_TIMEOUT -9, ERR_RESET -10, ERR_CANCELLED -11, ERR_EXISTS -12, ERR_NOT_DIR -13, ERR_IS_DIR -14`.
+  ERR_EOF -8, ERR_TIMEOUT -9, ERR_RESET -10, ERR_CANCELLED -11, ERR_EXISTS -12, ERR_NOT_DIR -13, ERR_IS_DIR -14, ERR_REFUSED -15, ERR_ADDR_IN_USE -16`.
 * A function returning i64 returns a value >= 0 (a handle is > 0) or one of those negative statuses.
 * An output buffer that is too small gives `ERR_TOO_LARGE` and nothing is written (grow and call again).
 * read, write, recv, send and stdin_read move at most 1 MiB per call; a short result is normal, L0 loops.
@@ -118,7 +118,9 @@ Status back to L0 codes:
 | `ERR_INVALID` -1 | `EINVAL` | `EINVAL` |
 | `ERR_TOO_LARGE` -5 | grow and retry | `ENAMETOOLONG` for paths, else grow and retry |
 | `ERR_QUOTA` -6 | `EMFILE` | `EMFILE` (handles), `ENOSPC` (write quota) |
-| `ERR_IO` -7 | `EIO` (also refused connection, address in use) | `EIO` |
+| `ERR_REFUSED` -15 | `ECONNREFUSED` | not produced |
+| `ERR_ADDR_IN_USE` -16 | `EADDRINUSE` | not produced |
+| `ERR_IO` -7 | `EIO` | `EIO` |
 
 The host never returns error text; `orin_platform_error_message` stays in L0.
 

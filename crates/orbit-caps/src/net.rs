@@ -281,8 +281,13 @@ enum SockRef {
 }
 
 fn io_status(e: &io::Error) -> i32 {
-    use io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected, TimedOut};
+    use io::ErrorKind::{
+        AddrInUse, BrokenPipe, ConnectionAborted, ConnectionRefused, ConnectionReset, NotConnected,
+        TimedOut,
+    };
     match e.kind() {
+        ConnectionRefused => status::ERR_REFUSED,
+        AddrInUse => status::ERR_ADDR_IN_USE,
         ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected => status::ERR_RESET,
         TimedOut => status::ERR_TIMEOUT,
         _ => status::ERR_IO,
