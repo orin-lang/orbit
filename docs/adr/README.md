@@ -11,3 +11,4 @@
 | [0007](0007-restricted-wasi-preview1-shim.md) | A restricted WASI preview 1 shim as a capability | accepted |
 | [0008](0008-fuel-metering-is-opt-in.md) | Fuel metering is opt-in | accepted |
 | [0009](0009-instance-pools-fresh-by-default.md) | Instance pools are fresh-per-acquire by default | accepted |
+| [0010](0010-network-capability-mirrors-the-orin-l0-tcp-layer.md) | Network capability mirrors the Orin L0 TCP layer | accepted |

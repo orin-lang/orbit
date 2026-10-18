@@ -31,6 +31,15 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 
 ## Known limitations
 
+* **Network (`orbit:net/v1`).** The grant scopes (`net:listen=...`, `net:connect=...`) are matched against the *text* the
+  guest passes, as in Orin's L0. A name covered by `*.example.com` that resolves to a loopback or private address is
+  reachable, and a DNS answer can change between the scope check and the connect: do not use host patterns as a
+  firewall; for hard guarantees run Orbit in a network namespace or behind an egress proxy. `dns_resolve` cannot be
+  cancelled once started (30 s bound). Quotas bound open sockets (default 64) and bytes per call (1 MiB) per isolate,
+  not total bandwidth, and nothing limits the number of connections a *listening* guest accepts, so a guest granted
+  `listen` is a server that must do its own admission. A listener on `0.0.0.0` is reachable from the network: grant the
+  narrowest address. Waits end at the isolate's wall-clock deadline, but a server without a deadline relies on fuel and
+  memory limits for CPU and on the process boundary for everything else. Tests: `crates/orbit-caps/tests/net.rs`.
 * No CPU-time accounting; fuel (opt-in) approximates instruction count, not time. Without fuel metering the CPU bound is
   the epoch deadline: wall-clock, tick-granular (10 ms by default) and not deterministic. The `orbit run` CLI sets no
   timeout by default, so a runaway guest runs until killed unless `--timeout-ms` or `--fuel` is given.

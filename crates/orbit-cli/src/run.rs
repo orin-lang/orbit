@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use orbit_abi::CapabilityId;
 use orbit_caps::{
-    ClockCapability, InMemoryKv, KvCapability, LogCapability, RandomCapability, StderrSink,
-    WasiCapability,
+    ClockCapability, InMemoryKv, KvCapability, LogCapability, NetCapability, RandomCapability,
+    StderrSink, WasiCapability, net_grant_config,
 };
 use orbit_runtime::{CapabilityRegistry, ExecError, Grants, Limits, Runtime, RuntimeConfig};
 
@@ -26,8 +26,15 @@ pub struct RunArgs {
     )]
     args: Vec<i64>,
     /// Grant a capability, e.g. `log/v1` (repeatable). Nothing is granted by default.
+    /// Network authority is granted with `net:listen=HOST:PORT[-PORT]` and
+    /// `net:connect=HOST:PORT[-PORT]` (HOST is `*`, `*.suffix` or exact; repeatable; each one
+    /// implies `net/v1`).
     #[arg(long = "grant", value_name = "CAP")]
     grants: Vec<String>,
+    /// Allow listening on `ADDR:PORT` or `ADDR:LO-HI` (implies `--grant net/v1`); repeatable.
+    /// Same as `--grant net:listen=ADDR:PORT`.
+    #[arg(long = "listen", value_name = "ADDR:PORT")]
+    listen: Vec<String>,
     /// KV namespace the module may open with `kv/v1` (repeatable).
     #[arg(long = "kv-namespace", value_name = "NAME")]
     kv_namespaces: Vec<String>,
@@ -46,8 +53,10 @@ pub struct RunArgs {
     /// is unmetered.
     #[arg(long, value_name = "N")]
     fuel: Option<u64>,
-    /// Wall-clock timeout per invocation in milliseconds. Without --fuel and without
-    /// --timeout-ms there is no CPU bound at all: a runaway guest runs until it is killed.
+    /// Wall-clock timeout per invocation in milliseconds; 0 = none. Without --fuel and
+    /// without --timeout-ms there is no CPU bound at all: a runaway guest runs until it is
+    /// killed. Network waits (`orbit:net/v1`) count against it: a server that blocks in
+    /// accept needs `0` or no flag.
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// Tenant id attached to the isolate's log records.
@@ -64,6 +73,7 @@ pub fn registry() -> CapabilityRegistry {
         .with(LogCapability::new(StderrSink))
         .with(clock)
         .with(RandomCapability::new())
+        .with(NetCapability::new())
         .with(KvCapability::new(InMemoryKv::new()))
         .with(wasi)
 }
@@ -85,7 +95,21 @@ fn wasi_config(args: &RunArgs) -> Result<serde_json::Value> {
 /// Runs the module; returns the process exit code (the guest's `proc_exit` code, else 0).
 pub async fn run(args: RunArgs) -> Result<i32> {
     let mut grants = Grants::none();
+    let (mut net_listen, mut net_connect) = (args.listen.clone(), Vec::new());
     for g in &args.grants {
+        if let Some((kind, scope)) = g
+            .strip_prefix("net:")
+            .and_then(|r| r.split_once('='))
+            .filter(|(k, _)| matches!(*k, "listen" | "connect"))
+        {
+            orbit_caps::NetScope::parse(scope).map_err(|e| anyhow::anyhow!("bad --grant: {e}"))?;
+            if kind == "listen" {
+                net_listen.push(scope.to_owned());
+            } else {
+                net_connect.push(scope.to_owned());
+            }
+            continue;
+        }
         let id: CapabilityId = g.parse().with_context(|| format!("bad --grant `{g}`"))?;
         if orbit_abi::spec(&id).is_none() {
             bail!(
@@ -101,6 +125,15 @@ pub async fn run(args: RunArgs) -> Result<i32> {
             grants.grant(id)
         };
     }
+    for scope in &args.listen {
+        orbit_caps::NetScope::parse(scope).map_err(|e| anyhow::anyhow!("bad --listen: {e}"))?;
+    }
+    if !net_listen.is_empty() || !net_connect.is_empty() {
+        grants = grants.grant_with(
+            CapabilityId::net_v1(),
+            net_grant_config(&net_listen, &net_connect),
+        );
+    }
     let wasi_flags = !args.wasi_args.is_empty() || !args.wasi_env.is_empty();
     if wasi_flags && !grants.contains(&CapabilityId::wasi_p1_v1()) {
         bail!("--wasi-arg/--wasi-env require --grant wasi_p1/v1");
@@ -113,7 +146,12 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         limits.max_memory_bytes = m;
     }
     limits.fuel = args.fuel;
-    limits.timeout = args.timeout_ms.map(Duration::from_millis);
+    // `--timeout-ms 0` means no wall-clock deadline at all (a server waiting in `accept`
+    // must not be killed by it); so does leaving the flag out.
+    limits.timeout = args
+        .timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis);
 
     let bytes = std::fs::read(&args.module)
         .with_context(|| format!("cannot read {}", args.module.display()))?;

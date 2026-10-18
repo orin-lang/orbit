@@ -143,6 +143,22 @@ What these say, and do not say:
   from a shared VM): keeping memory resident helps modules that touch much more memory per request, which this one
   does not. Measure with your own module before choosing a preset; no claim is made that either is better in general.
 * The "concurrent 500 acquires" scenario is a correctness test (`tests/pool.rs`), not a benchmark.
+### Network echo through a guest (`orbit:net/v1`)
+
+`cargo run --release -p orbit-caps --example net_load -- <isolates> <clients per isolate> <seconds>`. Each isolate runs a
+WAT server (accept, recv, send, close, repeat; one connection at a time) on its own loopback listener; each client
+connects, sends 64 bytes, reads them back and closes (connect included in the latency). Same machine as above (4
+logical CPUs, virtualised), 5 s runs, measured once:
+
+| Isolates x clients | Requests/s | p50 | p99 |
+|---|---|---|---|
+| 1 x 8 | 20 700 | 312 µs | 1.5 ms |
+| 4 x 8 | 19 900 | 687 µs | 16.6 ms |
+| 8 x 8 | 19 900 | 2.2 ms | 18.2 ms |
+
+Caveats: client and server share the 4 CPUs and one process, so this measures the whole loopback path (TCP connect and
+close per request dominate), not the host calls alone; the plateau at about 20 000 req/s is the machine, not a limit of
+the runtime. Each guest is single-threaded, so more isolates only add queueing here. One run, no confidence interval.
 
 ## Reading the numbers, and caveats
 

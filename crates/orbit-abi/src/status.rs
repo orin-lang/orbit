@@ -18,6 +18,14 @@ pub const ERR_TOO_LARGE: i32 = -5;
 pub const ERR_QUOTA: i32 = -6;
 /// The host adapter failed.
 pub const ERR_IO: i32 = -7;
+/// Orderly end of a stream (`orbit:net/v1` `stream_recv`): the peer closed its sending side.
+pub const ERR_EOF: i32 = -8;
+/// A waiting call hit its timeout (`orbit:net/v1`).
+pub const ERR_TIMEOUT: i32 = -9;
+/// The connection was reset, aborted or the pipe is broken (`orbit:net/v1`).
+pub const ERR_RESET: i32 = -10;
+/// A waiting call was cancelled through its wake source (`orbit:net/v1`).
+pub const ERR_CANCELLED: i32 = -11;
 
 /// Symbolic name of a status code, for diagnostics.
 #[must_use]
@@ -31,6 +39,10 @@ pub fn name(code: i32) -> &'static str {
         ERR_TOO_LARGE => "ERR_TOO_LARGE",
         ERR_QUOTA => "ERR_QUOTA",
         ERR_IO => "ERR_IO",
+        ERR_EOF => "ERR_EOF",
+        ERR_TIMEOUT => "ERR_TIMEOUT",
+        ERR_RESET => "ERR_RESET",
+        ERR_CANCELLED => "ERR_CANCELLED",
         _ => "UNKNOWN",
     }
 }
