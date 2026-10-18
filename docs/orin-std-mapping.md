@@ -97,6 +97,26 @@ The module imports its memory as shared `env.memory` (wasm32, declared max 65536
 trap in any thread ends all of them. Net, fs and process state is per isolate and shared by its threads. Modules without
 threads (exported, unshared memory) stay valid and keep the run-on-block scheduler.
 
+## Queues: not part of std (`orbit:queue/v1`)
+
+Publishing to a message queue is a platform service, not a std module, so it has **no row in the table above** and
+no L0 function: `std:*` stays portable and an unchanged program keeps running natively. The binding is a small
+separate Orin package (working name `orbit` or `orbit-queue`) that declares the two imports itself and wraps them:
+
+```ts
+// package: orbit-queue (std-less; only compiles for wasm32-orbit)
+extern "orbit:queue/v1" function publish(q: *u8, qlen: i64, body: *u8, blen: i64): i32;
+
+export function publish(queue: string, body: Bytes): Result<(), QueueError> { /* map status -> QueueError */ }
+export function publishBatch(queue: string, bodies: Array<Bytes>): Result<(), QueueError> { /* u32 LE framing */ }
+```
+
+Status mapping: `ERR_DENIED` to `QueueError.Denied(queue)`, `ERR_QUOTA` to `Full`, `ERR_TOO_LARGE`/`ERR_INVALID` to
+`Invalid`, `ERR_IO` to `Backend`. Grant: `orbit run --grant queue/v1 --publish-queue orders`, or in orbitd's app spec
+`"publish": ["orders"]`. The exact extern syntax depends on how the compiler exposes raw imports to packages; the
+contract is the signatures in host-abi.md section 4e. A host that does not grant `queue/v1` fails the module at load,
+so a program that links the package only runs where queues exist.
+
 ## L0 implementation notes
 
 * `file_read`: size, open(0), read until 0, close. `file_write`: open(1), write loop, flush, close; first error wins.
