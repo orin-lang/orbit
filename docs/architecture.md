@@ -84,6 +84,16 @@ Handles (KV namespaces, later files, sockets, streams) live in a per-instance ha
 never a host pointer. A handle from another instance or a closed handle is `ERR_BAD_HANDLE`; terminating an instance
 drops its table.
 
+## Network path
+
+A server is an ordinary guest. `orbit:net/v1` ([host-abi.md](host-abi.md) section 4b) gives it L0-shaped TCP calls; the
+waiting ones are `func_wrap_async` host functions, so a guest blocked in `accept` or `recv` is a suspended wasm stack
+and a Tokio task, not a thread. Each call resolves its handle in the isolate's table (`Arc<NetShared>`: sockets, wake
+sources, scopes, quotas), checks the grant scope, clones the `Arc` of the socket out of the lock, and awaits it with
+`select!` over {socket readiness, the wake source's `Notify`, a timeout clamped to the isolate's remaining deadline}.
+Guest memory is only touched before the wait (arguments, output-buffer bounds check) and after it (copy the result in),
+never across an `await`. A host can cancel from outside through `NetController::signal`.
+
 ## Resource accounting
 
 | Metric | Kind |

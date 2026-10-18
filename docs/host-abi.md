@@ -1,6 +1,6 @@
 # Orbit host ABI, version 1
 
-Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1) and
+Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1), `orbit:net/v1` (section 4b) and
 `wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a).
 Everything marked *reserved* is a design, not a feature.
 
@@ -44,6 +44,10 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -5 | `ERR_TOO_LARGE` | input over the per-call limit, or over a per-capability size limit |
 | -6 | `ERR_QUOTA` | a per-instance budget of this capability is exhausted |
 | -7 | `ERR_IO` | the host adapter failed |
+| -8 | `ERR_EOF` | orderly end of a stream (`orbit:net/v1` `recv`) |
+| -9 | `ERR_TIMEOUT` | a waiting call hit its timeout |
+| -10 | `ERR_RESET` | connection reset, aborted, or broken pipe |
+| -11 | `ERR_CANCELLED` | a waiting call was cancelled through its wake source |
 
 ## 4. Capabilities in version 1
 
@@ -91,6 +95,71 @@ Keys are 1 byte to 1 KiB (an empty key is `ERR_INVALID`), values at most 1 MiB. 
 `OK` (idempotent). At most 64 handles are open per instance (`ERR_QUOTA`). A handle is checked before any buffer, so a bad
 handle reports `ERR_BAD_HANDLE` even when a buffer is also invalid. The namespaces an instance may open are part of its grant; the storage of a
 namespace is scoped by tenant, so two tenants opening `"cache"` never see each other's keys.
+
+## 4b. `orbit:net/v1`: TCP, an image of the Orin L0 network layer
+
+Unchanged Orin `std:net` / `std:http` code reaches the network through the L0 functions `orin_platform_tcp_*`,
+`orin_platform_stream_recv/send`, `orin_platform_net_*`, `orin_platform_dns_resolve` and `orin_platform_wake_*`. This
+capability is the host side of exactly those functions, so the compiler's wasm platform layer is a thin adapter
+([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)). There is no HTTP in Orbit: HTTP is Orin
+library code over TCP.
+
+Conventions: pointers and lengths `i64`; functions return an `i64` (a value `>= 0`, a handle `> 0`, or a negative
+status) or an `i32` status; **there are no out-parameters**. Handles are `i64 > 0` (bit 63 never set) from a
+per-isolate table: slot index, generation and an instance tag. `wake` arguments name a wake source, `0` = none.
+`timeout_ms` is mandatory and bounded: `0..=3600000`, otherwise `ERR_INVALID`; there is no infinite wait.
+
+```
+tcp_listen(addr_ptr, addr_len, port: i32, backlog: i32, opt: i32) -> i64   // listener handle. opt bit 0: SO_REUSEADDR. backlog 1..=4096. addr is an IP literal
+local_port(h: i64) -> i32                                                   // bound port of a listener or stream (the real one when port was 0)
+tcp_accept(listener: i64, timeout_ms: i32, wake: i64) -> i64                // stream handle (TCP_NODELAY on). ERR_TIMEOUT if none arrived
+peer(h: i64, out_ptr, out_cap) -> i64                                       // length of the peer address text (numeric host); ERR_TOO_LARGE if out_cap is too small, nothing written
+peer_port(h: i64) -> i32
+tcp_connect(host_ptr, host_len, port: i32, timeout_ms: i32, wake: i64) -> i64  // stream handle; the timeout bounds the whole connect (all addresses)
+recv(h: i64, out_ptr, out_cap, timeout_ms: i32, wake: i64) -> i64          // bytes received, >= 1; ERR_EOF at orderly end; out_cap > 0
+send(h: i64, ptr, len, timeout_ms: i32, wake: i64) -> i64                  // bytes accepted, 0..=len (a partial write is normal; the caller sends the tail again)
+shutdown(h: i64, how: i32) -> i32                                           // 0 read, 1 write (sends FIN), 2 both
+close(h: i64) -> i32                                                        // listener or stream
+dns_resolve(name_ptr, name_len, out_ptr, out_cap) -> i64                   // length; numeric addresses of the name, each followed by '\n', duplicates removed, as many as fit; ERR_NOT_FOUND if it does not resolve; ERR_TOO_LARGE if not even one fits
+wake_open(parent: i64) -> i64                                               // wake handle; parent 0 = root
+wake_signal(h: i64) -> i32                                                  // 0; permanent and idempotent. Also signals every descendant
+wake_check(h: i64) -> i32                                                   // 1 if h or an ancestor is set, 0 if not
+wake_close(h: i64) -> i32
+```
+
+**Authority is the grant.** Grant configuration (all keys optional):
+`{"listen": ["127.0.0.1:8080"], "connect": ["*.example.com:443"], "max_sockets": 64, "max_bytes_per_call": 1048576}`.
+A scope is `host:port` or `host:lo-hi` (IPv6 literal in brackets). The host part follows the L0 rules: `*` (any),
+`*.sfx` (names ending in `.sfx`, not `sfx` itself) or the exact text, ASCII case-insensitive; for `listen` the text is
+an address literal. A name or address containing `*` is `ERR_INVALID`. A request outside every scope is
+**`ERR_DENIED` before any socket is created or any lookup is made**; with no `listen` / `connect` list everything is
+denied. `dns_resolve` needs a `connect` scope whose host pattern covers the name (any port). Scope matching is on the
+text the guest passed, not on the resolved address (see [security.md](security.md)). CLI: `--grant
+net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen ADDR:PORT`.
+
+**Waits** (`tcp_accept`, `tcp_connect`, `recv`, `send`) are asynchronous host functions: they never occupy an
+executor thread. A wait ends with the first of: success, `timeout_ms` (`ERR_TIMEOUT`), the wake source being set
+(`ERR_CANCELLED`, also when it was set before the call: that is checked first, so a cancelled task starts no new network
+work, and nothing is consumed), and the isolate's **remaining wall-clock deadline** (`Limits::timeout`; the call returns
+`ERR_TIMEOUT` and the epoch deadline then ends the guest). A reset connection is `ERR_RESET`; any other OS failure is
+`ERR_IO` (the exact errno is not exposed; ECONNREFUSED is `ERR_IO`). `dns_resolve` is bounded by 30 s and, like
+`getaddrinfo` in L0, is not interruptible by a wake source once started.
+
+**Wake sources** form a tree like L0's: a source opened under a parent is its child; signalling a parent sets every
+descendant, and a source opened under a set parent starts set. The binding of a source to the running task is the guest
+runtime's business (it passes the bound handle as `wake`), so the host holds no hidden per-thread state. The host can
+also signal from outside the guest (`orbit_caps::NetController`), which works while the isolate is busy in a wait.
+
+**Checking order** (so errors are predictable): handle (`ERR_BAD_HANDLE`: unknown, stale, forged, another instance's, or
+the wrong kind), argument ranges and `*`/UTF-8 (`ERR_INVALID`), output buffer bounds (`ERR_INVALID`, before anything is
+consumed), scope (`ERR_DENIED`), wake handle (`ERR_BAD_HANDLE`), socket quota (`ERR_QUOTA`), then the operation.
+
+**Quotas**: at most `max_sockets` open sockets per isolate (default 64, listeners and streams together; `ERR_QUOTA`),
+and `max_bytes_per_call` (default 1 MiB) per `recv` / `send` (larger requests are served partially, which both calls
+allow). At most 4096 live wake sources. Terminating the isolate closes all its sockets. A socket that is closed while a
+wait on it is still running in another call is released when that wait ends.
+
+All of it works with 32-bit and 64-bit memories.
 
 ## 4a. `wasi_p1/v1`: restricted WASI preview 1
 
@@ -150,7 +219,7 @@ A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecErro
 | `orin_exit_status() -> i32` | no | Orin convention: after `orin_main` trapped, the exit status the program set, or `-1` for a genuine trap. Read once by `orbit run` (library: `Isolate::post_mortem_i32`) |
 | `orbit_init` | no | called once after `_initialize`; a trap or a non-zero `i32` result fails initialisation |
 | any function | — | invocable by name with integer arguments |
-| `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads (events, HTTP bodies) in a later version |
+| `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads in a later version. Servers do not need it: an Orin server is a normal program that listens and accepts through `orbit:net/v1` ([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)) |
 
 Orin entry point. `post_mortem_i32(export)` is the only way to run guest code in the `Failed` state. It is allowed only
 after an `ExecError::Trap` (not after fuel exhaustion, a deadline, a memory-limit trap, a `proc_exit` or a failed
