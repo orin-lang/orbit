@@ -1,6 +1,6 @@
 # Orbit host ABI, version 1
 
-Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1),
+Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1), `orbit:queue/v1`,
 `wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a), then `orbit:fs/v1`, `orbit:process/v1` and
 `orbit:net/v1` (milestone 3, sections 4b to 4d).
 Everything marked *reserved* is a design, not a feature.
@@ -304,6 +304,30 @@ allow). At most 4096 live wake sources. Terminating the isolate closes all its s
 wait on it is still running in another call is released when that wait ends.
 
 All of it works with 32-bit and 64-bit memories.
+
+## 4e. `orbit:queue/v1`: publish to named queues
+
+Fire-and-forget message publishing behind a host adapter (`QueueBackend`; the embedder implements it, `InMemoryQueue`
+is for tests). Publish-only and handle-free: receiving is the embedder's business (it delivers messages to its own
+consumers), not a guest call.
+
+```
+publish(q_ptr: i64, q_len: i64, body_ptr: i64, body_len: i64) -> i32
+publish_batch(q_ptr: i64, q_len: i64, buf_ptr: i64, buf_len: i64) -> i32
+```
+
+* **Grant config `{"publish": ["orders", ...]}`, deny by default**: no config, an empty list or a queue not in the list
+  is `ERR_DENIED`. The grant is checked before the message is read.
+* A queue name is 1 to 255 bytes of UTF-8 (`ERR_INVALID` for empty or invalid UTF-8, `ERR_TOO_LARGE` for longer). A
+  message is 0 bytes to 1 MiB (`ERR_TOO_LARGE`).
+* `publish_batch` takes repeated frames of `u32` little-endian length followed by that many bytes: 1 to 256 messages,
+  at most 8 MiB framed. A truncated frame, trailing bytes or an empty batch is `ERR_INVALID`; an oversized frame or
+  too many messages is `ERR_TOO_LARGE`. Nothing is published unless the whole buffer parses. The batch is atomic if
+  the backend's `publish_batch` is (the default implementation publishes one by one).
+* `OK` means the backend accepted the message. A full queue or exhausted tenant quota is `ERR_QUOTA` (retry later may
+  succeed); a backend failure is `ERR_IO`. Delivery to consumers is at-least-once at best and is the backend's contract.
+* The tenant comes from the host and is part of every backend call: two tenants publishing to `"orders"` never share a
+  queue.
 
 ## 5. Guest exports
 
