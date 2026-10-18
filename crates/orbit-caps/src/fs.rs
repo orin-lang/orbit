@@ -294,6 +294,7 @@ fn map_io(e: &io::Error) -> i32 {
         K::IsADirectory => status::ERR_IS_DIR,
         K::NotADirectory => status::ERR_NOT_DIR,
         K::AlreadyExists => status::ERR_EXISTS,
+        K::DirectoryNotEmpty => status::ERR_NOT_EMPTY,
         K::InvalidInput => status::ERR_INVALID,
         _ => match e.raw_os_error() {
             #[cfg(unix)]
@@ -530,6 +531,118 @@ fn close(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
     } else {
         status::ERR_BAD_HANDLE
     }
+}
+
+fn sync(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
+    caller.data_mut().record_call(id);
+    let st = match state(caller.data_mut(), id) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match st.handles.get_mut(h) {
+        Some(OpenEntry::File { file, write, .. }) => {
+            if *write && let Err(e) = file.sync_all() {
+                return map_io(&e);
+            }
+            status::OK
+        }
+        Some(OpenEntry::Dir { .. }) => status::ERR_INVALID,
+        None => status::ERR_BAD_HANDLE,
+    }
+}
+
+/// Resolves a path that names an entry to change (rename, remove): it must lie inside a
+/// read-write mount and must not be the mount itself. Checked before any OS call.
+fn entry_of(st: &FsState, path: &str) -> Result<(Arc<Dir>, PathBuf), i32> {
+    let comps = normalize(&st.cwd, path);
+    match st.locate(&comps) {
+        Place::Outside | Place::Virtual(_) => Err(status::ERR_DENIED),
+        Place::In(m, rel) => {
+            if !m.writable || rel.as_os_str().is_empty() {
+                return Err(status::ERR_DENIED);
+            }
+            m.dir.clone().map(|d| (d, rel)).ok_or(status::ERR_IO)
+        }
+    }
+}
+
+fn rename(
+    id: &CapabilityId,
+    caller: &mut Caller<'_, HostState>,
+    from_ptr: i64,
+    from_len: i64,
+    to_ptr: i64,
+    to_len: i64,
+) -> i32 {
+    caller.data_mut().record_call(id);
+    let from = match read_path(caller, from_ptr, from_len) {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let to = match read_path(caller, to_ptr, to_len) {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let st = match state(caller.data_mut(), id) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let ((fd, frel), (td, trel)) = match (entry_of(st, &from), entry_of(st, &to)) {
+        (Ok(f), Ok(t)) => (f, t),
+        (Err(c), _) | (_, Err(c)) => return c,
+    };
+    if !Arc::ptr_eq(&fd, &td) {
+        return status::ERR_IO; // across mounts, like EXDEV across file systems
+    }
+    match fd.rename(&frel, &td, &trel) {
+        Ok(()) => status::OK,
+        Err(e) => map_io(&e),
+    }
+}
+
+fn remove(
+    id: &CapabilityId,
+    caller: &mut Caller<'_, HostState>,
+    ptr: i64,
+    len: i64,
+    dir: bool,
+) -> i32 {
+    caller.data_mut().record_call(id);
+    let path = match read_path(caller, ptr, len) {
+        Ok(p) => p,
+        Err(c) => return c,
+    };
+    let st = match state(caller.data_mut(), id) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    let (d, rel) = match entry_of(st, &path) {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    if !dir
+        && let Ok(md) = d.symlink_metadata(&rel)
+        && md.is_dir()
+    {
+        return status::ERR_IS_DIR; // unlink(2) says EISDIR on Linux, EPERM elsewhere
+    }
+    let r = if dir {
+        d.remove_dir(&rel)
+    } else {
+        d.remove_file(&rel)
+    };
+    match r {
+        Ok(()) => status::OK,
+        Err(e) => map_io(&e),
+    }
+}
+
+fn remove_file(id: &CapabilityId, caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> i32 {
+    remove(id, caller, ptr, len, false)
+}
+
+fn remove_dir(id: &CapabilityId, caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> i32 {
+    remove(id, caller, ptr, len, true)
 }
 
 /// `0` none, `1` file (anything that is not a directory), `2` directory; with the size.
@@ -803,6 +916,10 @@ impl Capability for FsCapability {
         wrap!("dir_close", (h: i64) -> i32, close);
         wrap!("realpath", (p: i64, l: i64, o: i64, c: i64) -> i64, realpath);
         wrap!("cwd", (o: i64, c: i64) -> i64, cwd);
+        wrap!("sync", (h: i64) -> i32, sync);
+        wrap!("rename", (fp: i64, fl: i64, tp: i64, tl: i64) -> i32, rename);
+        wrap!("remove_file", (p: i64, l: i64) -> i32, remove_file);
+        wrap!("remove_dir", (p: i64, l: i64) -> i32, remove_dir);
         Ok(())
     }
 

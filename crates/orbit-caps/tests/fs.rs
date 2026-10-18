@@ -43,6 +43,10 @@ fn wat(strings: &[String]) -> String {
   (import "orbit:fs/v1" "dir_close" (func $dir_close (param i64) (result i32)))
   (import "orbit:fs/v1" "realpath" (func $realpath (param i64 i64 i64 i64) (result i64)))
   (import "orbit:fs/v1" "cwd" (func $cwd (param i64 i64) (result i64)))
+  (import "orbit:fs/v1" "sync" (func $sync (param i64) (result i32)))
+  (import "orbit:fs/v1" "rename" (func $rename (param i64 i64 i64 i64) (result i32)))
+  (import "orbit:fs/v1" "remove_file" (func $remove_file (param i64 i64) (result i32)))
+  (import "orbit:fs/v1" "remove_dir" (func $remove_dir (param i64 i64) (result i32)))
   (memory (export "memory") {MEM_PAGES})
   {data}
   (func (export "open") (param i64 i64 i32) (result i64) (call $open (local.get 0) (local.get 1) (local.get 2)))
@@ -58,6 +62,11 @@ fn wat(strings: &[String]) -> String {
   (func (export "realpath") (param i64 i64 i64 i64) (result i64)
     (call $realpath (local.get 0) (local.get 1) (local.get 2) (local.get 3)))
   (func (export "cwd") (param i64 i64) (result i64) (call $cwd (local.get 0) (local.get 1)))
+  (func (export "sync") (param i64) (result i32) (call $sync (local.get 0)))
+  (func (export "rename") (param i64 i64 i64 i64) (result i32)
+    (call $rename (local.get 0) (local.get 1) (local.get 2) (local.get 3)))
+  (func (export "remove_file") (param i64 i64) (result i32) (call $remove_file (local.get 0) (local.get 1)))
+  (func (export "remove_dir") (param i64 i64) (result i32) (call $remove_dir (local.get 0) (local.get 1)))
   (func (export "byte") (param i64) (result i32) (i32.load8_u (i32.wrap_i64 (local.get 0)))))"#
     )
 }
@@ -141,6 +150,14 @@ const STRINGS: &[&str] = &[
     "payload",
     "AB",
     "CD",
+    "/work/moved.txt",
+    "/work/dir/f.txt",
+    "/work/empty",
+    "/work/link",
+    "/work/tmp.part",
+    "/other/x.txt",
+    "/work/escape",
+    "/work/escape/secret.txt",
 ];
 
 fn fixture_dirs(root: &Path) -> String {
@@ -805,4 +822,218 @@ async fn instances_do_not_share_state_or_quotas() {
         open(&mut a, f.s("/work/app.txt"), 1).await,
         c(status::ERR_QUOTA)
     );
+}
+
+/// `[from_ptr, from_len, to_ptr, to_len]` for `rename`.
+fn pair(a: [i64; 2], b: [i64; 2]) -> [i64; 4] {
+    [a[0], a[1], b[0], b[1]]
+}
+
+#[tokio::test]
+async fn rename_replaces_atomically_inside_one_rw_mount() {
+    let f = fx().await;
+    fs::write(f.work().join("new.txt"), b"one").unwrap();
+    fs::write(f.work().join("app.txt"), b"old").unwrap();
+    let mut iso = f.spawn().await;
+    let (new, moved, app) = (
+        f.s("/work/new.txt"),
+        f.s("/work/moved.txt"),
+        f.s("/work/app.txt"),
+    );
+    assert_eq!(call(&mut iso, "rename", &pair(new, moved)).await, 0);
+    assert!(!f.work().join("new.txt").exists());
+    assert_eq!(fs::read(f.work().join("moved.txt")).unwrap(), b"one");
+    // An existing target is replaced.
+    assert_eq!(call(&mut iso, "rename", &pair(moved, app)).await, 0);
+    assert_eq!(fs::read(f.work().join("app.txt")).unwrap(), b"one");
+    assert_eq!(
+        call(&mut iso, "rename", &pair(moved, app)).await,
+        c(status::ERR_NOT_FOUND)
+    );
+    // Onto a non-empty directory.
+    fs::write(f.work().join("dir/f.txt"), b"x").unwrap();
+    fs::create_dir(f.work().join("empty")).unwrap();
+    assert_eq!(
+        call(
+            &mut iso,
+            "rename",
+            &pair(f.s("/work/empty"), f.s("/work/dir"))
+        )
+        .await,
+        c(status::ERR_NOT_EMPTY)
+    );
+}
+
+#[tokio::test]
+async fn temp_file_sync_and_rename_is_an_atomic_write() {
+    // The sequence the Orin L0 uses for writeFileAtomic.
+    let f = fx().await;
+    fs::write(f.work().join("app.txt"), b"old").unwrap();
+    let mut iso = f.spawn().await;
+    let tmp = f.s("/work/tmp.part");
+    let h = open(&mut iso, tmp, 1).await;
+    let pay = f.s("payload");
+    assert_eq!(call(&mut iso, "write", &[h, pay[0], pay[1]]).await, 7);
+    assert_eq!(call(&mut iso, "sync", &[h]).await, 0);
+    assert_eq!(call(&mut iso, "close", &[h]).await, 0);
+    assert_eq!(
+        call(&mut iso, "rename", &pair(tmp, f.s("/work/app.txt"))).await,
+        0
+    );
+    assert_eq!(fs::read(f.work().join("app.txt")).unwrap(), b"payload");
+    assert!(!f.work().join("tmp.part").exists());
+    // sync on a read handle is a no-op, on a directory handle invalid, on a dead handle bad.
+    let r = open(&mut iso, f.s("/work/app.txt"), 0).await;
+    assert_eq!(call(&mut iso, "sync", &[r]).await, 0);
+    let d = call(&mut iso, "dir_open", &f.s("/work")).await;
+    assert_eq!(call(&mut iso, "sync", &[d]).await, c(status::ERR_INVALID));
+    assert_eq!(
+        call(&mut iso, "sync", &[h]).await,
+        c(status::ERR_BAD_HANDLE)
+    );
+}
+
+#[tokio::test]
+async fn remove_file_and_remove_dir() {
+    let f = fx().await;
+    fs::write(f.work().join("new.txt"), b"x").unwrap();
+    fs::write(f.work().join("dir/f.txt"), b"x").unwrap();
+    fs::create_dir(f.work().join("empty")).unwrap();
+    let mut iso = f.spawn().await;
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/work/new.txt")).await,
+        0
+    );
+    assert!(!f.work().join("new.txt").exists());
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/work/new.txt")).await,
+        c(status::ERR_NOT_FOUND)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/work/dir")).await,
+        c(status::ERR_IS_DIR)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_dir", &f.s("/work/dir")).await,
+        c(status::ERR_NOT_EMPTY)
+    );
+    assert!(f.work().join("dir/f.txt").exists());
+    assert_eq!(
+        call(&mut iso, "remove_dir", &f.s("/work/dir/f.txt")).await,
+        c(status::ERR_NOT_DIR)
+    );
+    assert_eq!(call(&mut iso, "remove_dir", &f.s("/work/empty")).await, 0);
+    assert!(!f.work().join("empty").exists());
+}
+
+#[tokio::test]
+async fn entry_changes_need_a_rw_mount_and_stay_inside_it() {
+    let f = fx().await;
+    let other = f.root.join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(f.work().join("new.txt"), b"x").unwrap();
+    let g = f.grant().mount("/other", &other, MountMode::ReadWrite);
+    let mut iso = f.spawn_with(&g).await;
+    let hello = f.s("/data/hello.txt");
+    // Read-only mount, outside every mount, a virtual directory and a mount root.
+    assert_eq!(
+        call(&mut iso, "remove_file", &hello).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(&mut iso, "rename", &pair(hello, f.s("/work/moved.txt"))).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(
+            &mut iso,
+            "rename",
+            &pair(f.s("/work/new.txt"), f.s("/data/new.txt"))
+        )
+        .await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/etc/passwd")).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_dir", &f.s("/")).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_dir", &f.s("/work")).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_file", &host_secret(&f)).await,
+        c(status::ERR_DENIED)
+    );
+    // Across two rw mounts: refused like a rename across file systems.
+    assert_eq!(
+        call(
+            &mut iso,
+            "rename",
+            &pair(f.s("/work/new.txt"), f.s("/other/x.txt"))
+        )
+        .await,
+        c(status::ERR_IO)
+    );
+    assert!(f.data().join("hello.txt").exists());
+    assert!(f.work().join("new.txt").exists());
+    assert!(!other.join("x.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn links_are_changed_themselves_and_never_lead_out() {
+    use std::os::unix::fs::symlink;
+    let f = fx().await;
+    symlink("../outside/secret.txt", f.work().join("link")).unwrap();
+    symlink("../outside", f.work().join("escape")).unwrap();
+    let mut iso = f.spawn().await;
+    assert_eq!(
+        call(
+            &mut iso,
+            "rename",
+            &pair(f.s("/work/link"), f.s("/work/moved.txt"))
+        )
+        .await,
+        0,
+        "the link itself is renamed"
+    );
+    assert!(
+        f.work()
+            .join("moved.txt")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/work/moved.txt")).await,
+        0
+    );
+    assert!(
+        f.root.join("outside/secret.txt").exists(),
+        "the target is untouched"
+    );
+    assert_eq!(
+        call(&mut iso, "remove_dir", &f.s("/work/escape")).await,
+        c(status::ERR_NOT_DIR)
+    );
+    assert_eq!(
+        call(&mut iso, "remove_file", &f.s("/work/escape/secret.txt")).await,
+        c(status::ERR_DENIED)
+    );
+    assert_eq!(
+        call(
+            &mut iso,
+            "rename",
+            &pair(f.s("/work/escape/secret.txt"), f.s("/work/moved.txt"))
+        )
+        .await,
+        c(status::ERR_DENIED)
+    );
+    assert!(f.root.join("outside").exists());
 }
