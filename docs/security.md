@@ -15,6 +15,8 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 | bounded CPU | wall-clock deadline (`Limits::timeout`, epoch based); with `EngineConfig::fuel_metering` also fuel per invocation. **Without metering and without a timeout nothing bounds a runaway guest**: always set a timeout in multi-tenant use ([ADR-0008](adr/0008-fuel-metering-is-opt-in.md)) | runaway-loop tests (`limits.rs`, `metering.rs`) |
 | handle ownership | per-instance handle tables with generations | KV handle tests |
 | tenant separation in shared adapters | adapters are keyed by tenant chosen by the host, never by the guest | KV tenant tests |
+| file system confinement | `fs/v1` resolves every path against preopened mounts: lexical normalisation in virtual space, then `cap-std` (`openat`-style, no ambient paths) inside the mount; read-only mounts refuse writes before any OS call; handles are per instance, quotas on handles and bytes | `crates/orbit-caps/tests/fs.rs` (escape, symlink, ro, handle, quota tests) |
+| no ambient process state | `process/v1` serves only the argv/env in the grant; stdin only with its own grant | `crates/orbit-caps/tests/process.rs`, `crates/orbit-cli/tests/cli.rs` |
 | cleanup | a trapped isolate is `Failed`, refuses work, and its store is dropped on terminate | cleanup tests |
 
 ## Assumptions (trusted computing base)
@@ -28,6 +30,28 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
   shared host resources that Orbit does not yet meter.
 * **Compiler checks are not a security property.** An Orin program that passed `orin check`, `orin verify` and the
   `[effects]` policy is still treated as untrusted code: its manifest is descriptive and every host call is checked.
+
+## File system threat model (`fs/v1`)
+
+Assets: the host files outside the mounts, and the host's files inside a read-only mount. Attacker: guest code that
+chooses every path string and every call order.
+
+| Threat | Defence |
+|---|---|
+| `..` above the mount, `/data/../etc/passwd`, absolute host paths | the guest path is virtual: normalised lexically and matched to a mount; anything outside is `ERR_DENIED` before an OS call. Host paths are not a namespace the guest can name |
+| symlink inside a mount pointing out (relative `../x` or absolute) | the mount directory is held as a capability handle and `cap-std` resolves components relative to it, refusing `..` and absolute links that leave it (`ERR_DENIED`); tested for read, stat, realpath and write |
+| symlink loops, very long paths | the OS/`cap-std` loop limit (`ERR_IO`); paths over 4096 bytes are `ERR_TOO_LARGE` |
+| write to a read-only mount | checked on the mount before opening (`ERR_DENIED`); no create, no truncate |
+| TOCTOU: a path checked, then swapped | Orbit never checks a path and then opens it by name outside the mount handle: confinement is part of the open itself. A race that **inside the mount** turns a regular file into a FIFO or device after the pre-check can still make `open` block the worker: only someone with write access to the host mount directory can do that (the guest cannot create special files through this API), so treat mounted directories as trusted-to-be-quiet |
+| handle confusion (stale, forged, foreign) | generation- and instance-tagged handles; `ERR_BAD_HANDLE` |
+| resource exhaustion | open-handle quota, 1 MiB per call, optional total-write quota. **Disk space used on the host and host file count are bounded only by those quotas**; there is no per-tenant disk accounting |
+| information leaks | status codes only; `realpath` returns virtual paths; no host path or OS message crosses the boundary. Directory sizes, file sizes and listing order are visible by design |
+| blocking host I/O | file calls run synchronously on the executor thread (bounded to 1 MiB each); a slow or network file system under a mount can delay other isolates on that worker |
+
+Not defended: a hostile host administrator who changes mount directories during a run (hard links to files
+outside the mount can be created by whoever owns the mount directory, and a hard link is just a file); mounting a
+directory that contains secrets is the operator's decision. Use a separate Orbit process per trust domain for
+mutually distrusting tenants.
 
 ## Known limitations
 

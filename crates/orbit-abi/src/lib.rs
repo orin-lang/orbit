@@ -54,4 +54,13 @@ pub mod limits {
     pub const KV_MAX_KEY_BYTES: u64 = 1024;
     /// Maximum KV value size.
     pub const KV_MAX_VALUE_BYTES: u64 = 1024 * 1024;
+    /// Maximum length of a guest path passed to `orbit:fs/v1`.
+    pub const FS_MAX_PATH_BYTES: u64 = 4096;
+    /// Maximum bytes moved by one `orbit:fs/v1` or `orbit:process/v1` read or write call
+    /// (a larger request is clamped: the call is partial).
+    pub const FS_MAX_IO_BYTES: u64 = 1024 * 1024;
+    /// Default number of open `orbit:fs/v1` handles (files and directories) per instance.
+    pub const FS_DEFAULT_MAX_HANDLES: usize = 64;
+    /// Bit set in the result of `fs.dir_next` when the entry is a directory.
+    pub const FS_DIR_FLAG: i64 = 0x4000_0000_0000_0000;
 }

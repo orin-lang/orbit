@@ -27,6 +27,7 @@ Benchmark source: `crates/orbit-runtime/benches/runtime.rs`; density: `crates/or
 | `instance/log_import_ondemand` | The same lifecycle for a module importing `orbit:log/v1` (linker with one capability, per-instance log state). |
 | `invoke/add` | Warm `invoke` of an exported `add(i64, i64)`: the fixed overhead of an invocation (state transitions, fuel/deadline setup, semaphore permit, async call, metrics). |
 | `invoke/fib_iter_25` | Iterative Fibonacci(25), a few hundred wasm instructions. |
+| `fs_read/chunk_*` (`cargo bench -p orbit-caps`) | A guest reads a 4 MiB file through `orbit:fs/v1` `open`/`read`/`close` in 4 KiB, 64 KiB and 1 MiB calls: host throughput of the file capability including path resolution once per iteration. |
 | `invoke/fib_rec_20` | Recursive Fibonacci(20) (about 22k calls), a compute-bound call. |
 | `invoke/fib_rec_20_metered`, `invoke/fib_iter_25_metered`, `instance/*_metered` | The same modules on a runtime built with `EngineConfig::fuel_metering = true` (ADR-0008); `Limits::fuel` stays unlimited, so the difference to the unsuffixed rows is the compiled-in accounting. |
 | `invoke/host_call_log_32b` | Invocation whose guest makes one `orbit:log/v1` `write` of 32 bytes to a sink that discards it (`NullSink`, defined in the bench): invoke overhead plus one host-call round trip. |

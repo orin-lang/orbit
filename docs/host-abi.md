@@ -1,7 +1,7 @@
 # Orbit host ABI, version 1
 
 Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1) and
-`wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a).
+`wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a), then `fs/v1` and `process/v1` (sections 4b, 4c).
 Everything marked *reserved* is a design, not a feature.
 
 This document is the contract between a guest module (an Orin program compiled to WebAssembly, or any other module)
@@ -44,6 +44,13 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -5 | `ERR_TOO_LARGE` | input over the per-call limit, or over a per-capability size limit |
 | -6 | `ERR_QUOTA` | a per-instance budget of this capability is exhausted |
 | -7 | `ERR_IO` | the host adapter failed |
+| -8 | `ERR_EOF` | end of stream (net) |
+| -9 | `ERR_TIMEOUT` | a timeout expired (net, `process.stdin_read`) |
+| -10 | `ERR_RESET` | the peer reset the connection (net) |
+| -11 | `ERR_CANCELLED` | the operation was cancelled (net) |
+| -12 | `ERR_EXISTS` | the object already exists |
+| -13 | `ERR_NOT_DIR` | a path component is not a directory |
+| -14 | `ERR_IS_DIR` | the path names a directory where a file is needed |
 
 ## 4. Capabilities in version 1
 
@@ -138,6 +145,96 @@ checked like everywhere else; a bad pointer is `EFAULT` (21), never a trap.
 | non-zero | `Err(ExecError::Exit(code))`; `exit_code()` is `Some(code)` | `Failed` (only `terminate` is possible) |
 
 A trap (including a Rust panic, which aborts on `wasm32-wasip1`) is an `ExecError::Trap`, not an exit.
+
+## 4b. `orbit:fs/v1`: files under virtual mounts
+
+Designed so the Orin L0 platform layer's file functions (`orin_platform_file_*`, `dir_list`, `stream_*`, `path_*`) can be
+implemented faithfully, and so unchanged `std:fs` code runs on Orbit ([ADR-0011](adr/0011-fs-and-process-capabilities-mirror-the-orin-l0-layer.md)).
+Functions returning `i64` return a value `>= 0` or a negative status; handles are `> 0`. **Whenever an output buffer is
+too small the call returns `ERR_TOO_LARGE` and writes nothing.**
+
+```
+open(path_ptr: i64, path_len: i64, mode: i32) -> i64     // handle; mode 0 read, 1 write (create/truncate), 2 append (create)
+read(h: i64, out_ptr: i64, out_cap: i64) -> i64          // bytes read, 0 = end of file; may be short
+write(h: i64, ptr: i64, len: i64) -> i64                 // bytes written; may be short (loop)
+flush(h: i64) -> i32
+close(h: i64) -> i32                                     // also closes directory handles
+stat(path_ptr: i64, path_len: i64) -> i32                // 0 none, 1 file (anything not a directory), 2 directory
+size(path_ptr: i64, path_len: i64) -> i64                // size of a file in bytes
+dir_open(path_ptr: i64, path_len: i64) -> i64            // handle
+dir_next(h: i64, out_ptr: i64, out_cap: i64) -> i64      // name length | 0x4000_0000_0000_0000 if a directory; 0 = end
+dir_close(h: i64) -> i32
+realpath(path_ptr: i64, path_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length of the virtual canonical path
+cwd(out_ptr: i64, out_cap: i64) -> i64                   // length of the virtual working directory (absolute)
+```
+
+**Authority is the mounts in the grant.** A mount binds a virtual absolute path to a host directory, read-only or
+read-write. CLI: `--grant fs:/data=./hostdir:ro` (`:rw` for write; read-only if the suffix is omitted; repeatable,
+several mounts allowed; mounts may not overlap or nest). Embedders use `FsGrant` (`orbit-caps`), whose JSON is
+`{"mounts":[{"guest":"/data","host":"/abs/dir","writable":false}],"cwd":"/","max_handles":64,"max_write_bytes":null}`.
+A malformed config grants nothing.
+
+**Path resolution.** A guest path is bytes that must be UTF-8 without NUL (`ERR_INVALID`), non-empty (`ERR_NOT_FOUND`)
+and at most 4096 bytes (`ERR_TOO_LARGE`). A relative path resolves against the virtual cwd (`/`, or `--cwd`). The
+result is normalised lexically (`.` and empty components dropped, `..` removes the previous component and is dropped at
+the root), like the L0's `path_normalize`. The normalised path must lie in a mount, otherwise **`ERR_DENIED`**; so
+`/data/../etc/passwd` and any host absolute path are denied. Inside a mount the remainder is resolved relative to the
+mount's directory handle by the OS-level confinement of `cap-std`: `..` that leaves the mount (for example through a
+symlink), absolute symlinks and symlinks that point outside are `ERR_DENIED`; symlinks that stay inside are followed.
+A write (`open` with mode 1 or 2) on a read-only mount is `ERR_DENIED` **before any OS call**. A proper ancestor of a
+mount (`/` when mounts are `/data` and `/work`) is a read-only virtual directory: `stat` says 2, `dir_open` lists the
+mount names, `open` is `ERR_IS_DIR`.
+
+**Semantics.**
+* `open`: a directory is `ERR_IS_DIR`; a path component that is a file is `ERR_NOT_DIR`; a missing file (mode 0) or a
+  missing parent (modes 1, 2) is `ERR_NOT_FOUND`; a non-regular file (FIFO, device) is `ERR_DENIED` and never opened.
+  `read` on a write handle and `write` on a read handle are `ERR_INVALID`. The host does not buffer: `write` hands bytes
+  to the OS, `flush` is a no-op on the host side (the L0 buffers).
+* `read` returns at most 1 MiB per call (a larger `out_cap` is clamped, so a short read is not end of file; only 0 is).
+  `write` accepts at most 1 MiB per call and returns the count written; the caller loops. A bad output range is
+  `ERR_INVALID` **before** any byte is consumed.
+* `stat`: a missing path is `0` (not an error); `ERR_DENIED` outside the mounts; the size comes from `size` (a missing
+  file is `ERR_NOT_FOUND`, a directory `ERR_IS_DIR`). A whole-file read is `size` + `open` + `read` loop + `close`.
+* `dir_next` enumerates a directory opened by `dir_open` in OS order, without `.` and `..`. The directory flag is true
+  only for real directories (a symlink to a directory is **not** flagged). A name that does not fit in `out_cap` gives
+  `ERR_TOO_LARGE` and is **not consumed**: call again with a bigger buffer. Names that are not valid UTF-8 are skipped.
+  `0` means the end; an I/O error in the middle is a negative status and the caller discards the partial listing.
+* `realpath`: the longest existing prefix with symlinks resolved, then the non-existing rest unchanged; the result is a
+  **virtual** path (never a host path). `ERR_NOT_FOUND` if the first missing component is a dangling symlink, `ERR_DENIED`
+  for an escaping link.
+* Handles (files and directories) live in the per-instance `HandleTable`; a stale, forged or foreign handle is
+  `ERR_BAD_HANDLE`; a handle of the wrong kind (`dir_next` on a file) is `ERR_INVALID`.
+
+**Quotas.** Open handles per instance (default 64, `--fs-max-handles`, `ERR_QUOTA` on `open`/`dir_open`); at most
+1 MiB per `read`/`write` call; optional total bytes written over the instance's life (`--fs-max-write-bytes`; a
+`write` that would pass it is `ERR_QUOTA` and writes nothing).
+
+**Errors.** Host failures become status codes only: not found, denied (including OS permission errors), is-a-directory,
+not-a-directory, name too long (`ERR_TOO_LARGE`) have their own codes; everything else (disk full, I/O error, link loop,
+too many host files) is `ERR_IO`. Host paths and OS error text never reach the guest.
+
+## 4c. `orbit:process/v1`: arguments, environment, standard input
+
+```
+arg_count() -> i32
+arg(i: i32, out_ptr: i64, out_cap: i64) -> i64                       // length; ERR_INVALID if i is out of range
+env_get(name_ptr: i64, name_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length; ERR_NOT_FOUND if unset
+stdin_read(out_ptr: i64, out_cap: i64, timeout_ms: i64) -> i64       // bytes, 0 = end of input
+```
+
+Nothing is inherited from the host: the argument vector and the environment are exactly what the grant carries
+(`{"args":["prog","x"],"env":{"K":"V"},"stdin":false}`, `ProcessGrant`). The capability is **deny by default** like
+all others, including `arg_count`: a module that imports it without the grant fails with `NotGranted`. The CLI grants it
+for you when `--app-arg X` (repeatable; argv[0] is the module file name without extension, then the arguments),
+`--env K=V`, `--env-pass K` (copies that one host variable if it is set; never the whole environment) or
+`--grant process/v1` is given; standard input needs `--grant process:stdin`. The existing `--arg` (for `--invoke`) and
+`--wasi-arg`/`--wasi-env` (WASI) are unchanged. An empty value is defined (`0` length); `=` or NUL in a name is
+`ERR_INVALID`. A value that does not fit gives `ERR_TOO_LARGE` with nothing written (query with `out_cap` 0, retry).
+
+`stdin_read` without the stdin grant is `ERR_DENIED`. It returns what is available, at most `out_cap` and 1 MiB
+(a short read is not end of input; only `0` is). `timeout_ms < 0` waits without bound, `0` polls, otherwise the call is
+`ERR_TIMEOUT` if no byte arrived in time. The CLI reads the process's stdin from a helper thread (shared by all isolates
+of the process). Reads block a Tokio worker for the wait, so use a timeout in multi-tenant embeddings.
 
 ## 5. Guest exports
 
