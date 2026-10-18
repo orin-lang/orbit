@@ -1,0 +1,21 @@
+function build(n: int): int[] {
+  let xs: int[] = [];
+  let i = 0;
+  while (i < n) {
+    xs.push(i * 2);
+    i += 1;
+  }
+  return xs;
+}
+
+function main(): void {
+  const xs = build(4);
+  console.log("before the trap");
+  let k: usize = 0;
+  let sum = 0;
+  while (k < 10) {
+    sum += xs[k];
+    k += 1;
+  }
+  console.log("unreachable " + sum.toString());
+}

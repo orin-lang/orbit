@@ -168,3 +168,28 @@ What these say, and do not say:
   figures in ADR-0008 are the better indication for real programs.
 * No comparison with other runtimes, container or process-based approaches, or native code was made, and none is
   implied. These numbers should not be used to argue that Orbit is faster or smaller than anything else.
+
+## Orin programs (compiled Orin code in Orbit)
+
+A real Orin program, `tests/guests/orin/compute` (`fib(35)`, a sieve of Eratosthenes over 5M flags, Collatz steps for
+1..300000, 1000 small strings), built with `orin build --release` (Orin commit in
+`crates/orbit-cli/tests/fixtures/orin/VERSION`) natively and for `wasm32-orbit` / `wasm64-orbit`, run with the release
+`orbit` binary (`orbit run compute_NN.wasm --grant log/v1 --max-memory 268435456`, **unmetered**). Wall time of the whole
+process, 6 runs each, `python3 time.perf_counter`, same VM as above (4 vCPU Xeon 2.10GHz, shared, noisy; other jobs ran on it):
+
+| Run | Median | Range (6 runs) |
+|---|---|---|
+| native, Orin LLVM backend (release default) | 0.247 s | 0.218 to 0.315 s |
+| native, Orin C backend (`--backend=c`, clang -O2) | 0.266 s | 0.223 to 0.293 s |
+| Orbit, `wasm32-orbit` | 0.536 s | 0.437 to 0.589 s |
+| Orbit, `wasm64-orbit` | 0.568 s | 0.475 to 0.660 s |
+| Orbit, `wasm32-orbit`, `--fuel 100000000000` (metered) | 0.636 s | 0.540 to 0.650 s |
+| `hello` (3 log lines), wasm32 / wasm64 | 0.051 s / 0.081 s | 0.037 to 0.110 s |
+
+Caveats: the Orbit rows include process start, module validation and Cranelift compilation of a roughly 110 KB module
+(the `hello` row, almost all of it fixed cost, is 40 to 80 ms), so the compute-only gap is smaller than the table
+suggests: about 2x native overall, of which roughly 50 to 80 ms is load. The wasm32 versus wasm64 difference (about 6%) is
+within the noise of this machine, so these runs do not confirm or refute the Orin team's per-program figures in
+[orin-integration.md](orin-integration.md) section 2a. Orin `int` is 8 bytes, so this program needs more than the default
+16 MiB memory limit (the sieve alone is 40 MB): with the default limit it traps with `out of memory` (a test pins this).
+One machine, one program: not a comparison with other runtimes.
