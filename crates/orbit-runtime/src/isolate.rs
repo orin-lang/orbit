@@ -398,6 +398,14 @@ impl Isolate {
         Ok(values)
     }
 
+    /// The per-isolate state of capability `id`, if it has state of type `T`. A host uses it
+    /// to reach a capability's control surface from outside the guest (for example to signal a
+    /// `orbit:net/v1` wake source while the isolate is busy in a wait). `None` after
+    /// [`terminate`](Self::terminate).
+    pub fn cap_state_mut<T: std::any::Any>(&mut self, id: &CapabilityId) -> Option<&mut T> {
+        self.store.as_mut()?.data_mut().cap_state_mut::<T>(id)
+    }
+
     /// Reads the program's exit status from a guest export after a trap.
     ///
     /// Some guests (for example Orin programs, see `docs/host-abi.md` section 5) record the

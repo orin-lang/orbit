@@ -157,12 +157,80 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         wasm32_only: false,
     },
     CapabilitySpec {
+        name: "net",
+        major: 1,
+        funcs: NET_FUNCS,
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
+        name: "fs",
+        major: 1,
+        funcs: &[
+            mem_sig("open", &[I64, I64, I32], &[I64]),
+            mem_sig("read", &[I64, I64, I64], &[I64]),
+            mem_sig("write", &[I64, I64, I64], &[I64]),
+            sig("flush", &[I64], &[I32]),
+            sig("close", &[I64], &[I32]),
+            mem_sig("stat", &[I64, I64], &[I32]),
+            mem_sig("size", &[I64, I64], &[I64]),
+            mem_sig("dir_open", &[I64, I64], &[I64]),
+            mem_sig("dir_next", &[I64, I64, I64], &[I64]),
+            sig("dir_close", &[I64], &[I32]),
+            mem_sig("realpath", &[I64, I64, I64, I64], &[I64]),
+            mem_sig("cwd", &[I64, I64], &[I64]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
+        name: "process",
+        major: 1,
+        funcs: &[
+            sig("arg_count", &[], &[I32]),
+            mem_sig("arg", &[I32, I64, I64], &[I64]),
+            mem_sig("env_get", &[I64, I64, I64, I64], &[I64]),
+            mem_sig("stdin_read", &[I64, I64, I64], &[I64]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
         name: "wasi_p1",
         major: 1,
         funcs: WASI_P1_FUNCS,
         module: Some(WASI_P1_IMPORT_MODULE),
         wasm32_only: true,
     },
+];
+
+/// The functions of `orbit:net/v1` (`docs/host-abi.md` section 4d): an image of the Orin L0 TCP
+/// layer. Results are `i64` (a value `>= 0`, a handle `> 0`, or a negative status) or `i32`
+/// status; there are no out-parameters.
+pub static NET_FUNCS: &[FuncSig] = &[
+    // (addr_ptr, addr_len, port, backlog, opt) -> listener handle
+    mem_sig("tcp_listen", &[I64, I64, I32, I32, I32], &[I64]),
+    sig("local_port", &[I64], &[I32]),
+    // (listener, timeout_ms, wake) -> stream handle
+    sig("tcp_accept", &[I64, I32, I64], &[I64]),
+    // (h, out_ptr, out_cap) -> length of the peer host text
+    mem_sig("peer", &[I64, I64, I64], &[I64]),
+    sig("peer_port", &[I64], &[I32]),
+    // (host_ptr, host_len, port, timeout_ms, wake) -> stream handle
+    mem_sig("tcp_connect", &[I64, I64, I32, I32, I64], &[I64]),
+    // (h, out_ptr, out_cap, timeout_ms, wake) -> bytes received (>= 1)
+    mem_sig("recv", &[I64, I64, I64, I32, I64], &[I64]),
+    // (h, ptr, len, timeout_ms, wake) -> bytes sent
+    mem_sig("send", &[I64, I64, I64, I32, I64], &[I64]),
+    sig("shutdown", &[I64, I32], &[I32]),
+    sig("close", &[I64], &[I32]),
+    // (name_ptr, name_len, out_ptr, out_cap) -> length of the address list
+    mem_sig("dns_resolve", &[I64, I64, I64, I64], &[I64]),
+    // (parent) -> wake handle
+    sig("wake_open", &[I64], &[I64]),
+    sig("wake_signal", &[I64], &[I32]),
+    sig("wake_check", &[I64], &[I32]),
+    sig("wake_close", &[I64], &[I32]),
 ];
 
 /// The functions of the restricted WASI preview 1 shim (`wasi_snapshot_preview1`), with
@@ -247,6 +315,22 @@ impl CapabilityId {
     #[must_use]
     pub fn kv_v1() -> Self {
         Self::new("kv", 1)
+    }
+
+    /// `orbit:net/v1`.
+    #[must_use]
+    pub fn net_v1() -> Self {
+        Self::new("net", 1)
+    }
+    /// `orbit:fs/v1`.
+    #[must_use]
+    pub fn fs_v1() -> Self {
+        Self::new("fs", 1)
+    }
+    /// `orbit:process/v1`.
+    #[must_use]
+    pub fn process_v1() -> Self {
+        Self::new("process", 1)
     }
 
     /// Capability name, e.g. `log`.
@@ -384,7 +468,7 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 5);
+        assert_eq!(CAPABILITIES.len(), 8);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
     }
 

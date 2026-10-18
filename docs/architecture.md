@@ -19,7 +19,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
                                                         │
  orbit-caps ────────────────────────────────────────────┼──────────────────────────────────────────────────
-   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  wasi_p1/v1 (wasi_snapshot_preview1)
+   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:fs/v1  orbit:process/v1  wasi_p1/v1
    adapters     LogSink (stderr, memory)   KvStore (in-memory, tenant-scoped)   ... later: Postgres pool, Kafka, S3
                                                         │
  orbit-abi ─────────────────────────────────────────────┴──────────────────────────────────────────────────
@@ -62,6 +62,29 @@ A dormant application is just its `Artifact` (shared compiled code) plus configu
 * **Admission control**: at most N invocations run at once (semaphore); the sum of memory limits of live isolates
   never exceeds the runtime's memory budget; above that `spawn_isolate` fails fast instead of overcommitting.
 
+## Instance pools and warm reuse
+
+`Runtime::pool(artifact, tenant, grants, limits, PoolConfig)` returns an `InstancePool`: ready, initialised, idle
+isolates for exactly that tuple ([ADR-0009](adr/0009-instance-pools-fresh-by-default.md)). The hot path of a request is
+`let mut iso = pool.acquire().await?; iso.invoke(..).await; drop(iso);`.
+
+* **Fresh by default.** `ReusePolicy::FreshPerAcquire`: each acquire gets a never-used isolate and release terminates
+  it, so no state crosses requests; the pool only hides instantiate + init latency. `Reuse { max_uses }` returns healthy
+  isolates to the pool and **keeps guest memory, globals, tables and handles across requests of the same tenant**.
+  Failed, terminated or mid-call-cancelled isolates are never reused. Pools are never shared across tenants or grant
+  sets: the tuple is fixed at construction and `acquire` takes no tenant argument.
+* **Sizing.** `min_idle` (kept ready by a background task, refilled after acquires), `max_idle`, `max_total` (acquire
+  waits beyond it), `idle_timeout`. `prewarm(n)` fills synchronously. `PoolStats` reports hits, misses, created,
+  recycled, discarded, evicted, idle, in use and reserved bytes.
+* **Accounting.** An idle pooled isolate holds its `Limits::max_memory_bytes` reservation like a running one. When
+  `spawn_isolate` fails admission it calls `Runtime::reclaim_idle(bytes)`, which terminates idle pooled isolates, longest
+  idle first across all pools, then retries once. Isolates checked out of a pool are never evicted.
+* **Scale to zero.** The per-pool task terminates isolates idle for more than `idle_timeout`, down to `min_idle`
+  (which may be 0). It holds a weak reference and ends with the last pool handle.
+* **Allocator.** `PoolingConfig` has the knobs that matter (`max_instances` including idle pooled isolates, slot size,
+  table elements, keep-resident bytes) with `density` and `latency` presets. Not done: a disk cache of precompiled
+  code (`Module::deserialize` is `unsafe`).
+
 ## Capabilities: contract versus adapter
 
 A capability is two things: the **contract** (import module `orbit:kv/v1`, its functions and their semantics, in
@@ -84,6 +107,16 @@ Handles (KV namespaces, later files, sockets, streams) live in a per-instance ha
 never a host pointer. A handle from another instance or a closed handle is `ERR_BAD_HANDLE`; terminating an instance
 drops its table.
 
+## Network path
+
+A server is an ordinary guest. `orbit:net/v1` ([host-abi.md](host-abi.md) section 4d) gives it L0-shaped TCP calls; the
+waiting ones are `func_wrap_async` host functions, so a guest blocked in `accept` or `recv` is a suspended wasm stack
+and a Tokio task, not a thread. Each call resolves its handle in the isolate's table (`Arc<NetShared>`: sockets, wake
+sources, scopes, quotas), checks the grant scope, clones the `Arc` of the socket out of the lock, and awaits it with
+`select!` over {socket readiness, the wake source's `Notify`, a timeout clamped to the isolate's remaining deadline}.
+Guest memory is only touched before the wait (arguments, output-buffer bounds check) and after it (copy the result in),
+never across an `await`. A host can cancel from outside through `NetController::signal`.
+
 ## Resource accounting
 
 | Metric | Kind |
@@ -100,4 +133,5 @@ drops its table.
 
 See [adr/](adr/): Wasmtime (0001), a core-wasm ABI before the Component Model (0002), deny-by-default linking and
 manifests as description (0003), 64-bit pointers in the ABI (0004), async isolates with epoch time slices (0005),
-shared adapters with per-instance handles (0006), the restricted WASI preview 1 shim (0007).
+shared adapters with per-instance handles (0006), the restricted WASI preview 1 shim (0007), fuel metering opt-in
+(0008), instance pools fresh by default (0009).

@@ -1,0 +1,5 @@
+function main(): void {
+  console.log("hello from orin");
+  console.log("line two");
+  console.log("line three");
+}

@@ -88,6 +88,7 @@ async fn metered_pooling_and_unmetered_pooling_both_work() {
                 pooling: Some(PoolingConfig {
                     max_instances: 4,
                     max_memory_bytes: 4 * 1024 * 1024,
+                    ..PoolingConfig::default()
                 }),
                 fuel_metering: metering,
                 ..EngineConfig::default()

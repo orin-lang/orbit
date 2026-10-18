@@ -1,0 +1,27 @@
+import { scope, spawn, spawnDo, channel } from "std:task";
+
+function main(): void {
+  const total = scope(s => {
+    const a = spawn(s, () => 20 + 1);
+    const b = spawn(s, () => 21);
+    return a.join() + b.join();
+  });
+  console.log("joined: " + total.toString());
+  const ch = channel<int>(8);
+  scope(s => {
+    spawnDo(s, () => {
+      let i = 1;
+      while (i <= 5) { ch.tx.send(i * i); i += 1; }
+      ch.tx.close();
+    });
+    let sum = 0;
+    let more = true;
+    while (more) {
+      match (ch.rx.recv()) {
+        Some(v) => { sum += v; },
+        None => { more = false; },
+      }
+    }
+    console.log("channel sum: " + sum.toString());
+  });
+}

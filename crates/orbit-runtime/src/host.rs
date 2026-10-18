@@ -119,6 +119,14 @@ impl HostState {
         self.caps.get_mut(id).map(|b| &mut **b)
     }
 
+    /// Time left until the running invocation's wall-clock deadline (`Limits::timeout`), or
+    /// `None` when there is no deadline. Long-waiting host functions clamp their waits to it.
+    #[must_use]
+    pub fn deadline_remaining(&self) -> Option<std::time::Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
     /// Id of this isolate (host-assigned; the guest cannot influence it).
     #[must_use]
     pub fn instance_id(&self) -> InstanceId {
@@ -205,6 +213,21 @@ pub fn read_guest_bytes(
     let data = mem.data(&*caller);
     let r = range(data.len(), ptr, len)?;
     Ok(data[r].to_vec())
+}
+
+/// Checks that `(ptr, len)` lies inside the guest's exported `memory` right now, without
+/// copying anything. Long-running host functions call it *before* they wait or consume
+/// input, so a bad output pointer is refused while nothing has happened yet.
+///
+/// # Errors
+/// [`status::ERR_INVALID`] as for [`read_guest_bytes`].
+pub fn check_guest_range(
+    caller: &mut Caller<'_, HostState>,
+    ptr: i64,
+    len: i64,
+) -> Result<(), i32> {
+    let mem = guest_memory(caller)?;
+    range(mem.data_size(&*caller), ptr, len).map(|_| ())
 }
 
 /// Copies `bytes` into the guest's exported `memory` at `ptr`.

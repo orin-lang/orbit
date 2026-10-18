@@ -5,8 +5,9 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use orbit_abi::CapabilityId;
 use orbit_caps::{
-    ClockCapability, InMemoryKv, KvCapability, LogCapability, RandomCapability, StderrSink,
-    WasiCapability,
+    ClockCapability, FsCapability, FsGrant, HostStdin, InMemoryKv, KvCapability, LogCapability,
+    MountMode, NetCapability, ProcessCapability, ProcessGrant, RandomCapability, StderrSink,
+    WasiCapability, net_grant_config,
 };
 use orbit_runtime::{CapabilityRegistry, ExecError, Grants, Limits, Runtime, RuntimeConfig};
 
@@ -26,8 +27,17 @@ pub struct RunArgs {
     )]
     args: Vec<i64>,
     /// Grant a capability, e.g. `log/v1` (repeatable). Nothing is granted by default.
+    /// Network authority is granted with `net:listen=HOST:PORT[-PORT]` and
+    /// `net:connect=HOST:PORT[-PORT]` (HOST is `*`, `*.suffix` or exact; repeatable; each one
+    /// implies `net/v1`).
+    /// `fs:/guest/path=./host/dir[:ro|:rw]` mounts a host directory (read-only unless `:rw`)
+    /// and grants `fs/v1`; `process:stdin` grants `process/v1` with standard input.
     #[arg(long = "grant", value_name = "CAP")]
     grants: Vec<String>,
+    /// Allow listening on `ADDR:PORT` or `ADDR:LO-HI` (implies `--grant net/v1`); repeatable.
+    /// Same as `--grant net:listen=ADDR:PORT`.
+    #[arg(long = "listen", value_name = "ADDR:PORT")]
+    listen: Vec<String>,
     /// KV namespace the module may open with `kv/v1` (repeatable).
     #[arg(long = "kv-namespace", value_name = "NAME")]
     kv_namespaces: Vec<String>,
@@ -38,6 +48,26 @@ pub struct RunArgs {
     /// own environment is never passed.
     #[arg(long = "wasi-env", value_name = "K=V")]
     wasi_env: Vec<String>,
+    /// Argument for `orbit:process/v1`, after argv[0] (the module name); repeatable.
+    /// Grants `process/v1` automatically.
+    #[arg(long = "app-arg", value_name = "ARG", allow_hyphen_values = true)]
+    app_args: Vec<String>,
+    /// Environment variable `K=V` for `orbit:process/v1`; repeatable. Grants `process/v1`.
+    #[arg(long = "env", value_name = "K=V")]
+    env: Vec<String>,
+    /// Copy one host environment variable into `orbit:process/v1` (repeatable); the host's
+    /// environment is never passed as a whole. An unset variable stays undefined.
+    #[arg(long = "env-pass", value_name = "K")]
+    env_pass: Vec<String>,
+    /// Virtual working directory for relative paths of `orbit:fs/v1` (default `/`).
+    #[arg(long, value_name = "PATH")]
+    cwd: Option<String>,
+    /// Maximum open `orbit:fs/v1` handles (files and directories); default 64.
+    #[arg(long, value_name = "N")]
+    fs_max_handles: Option<usize>,
+    /// Maximum total bytes the guest may write through `orbit:fs/v1`; default unlimited.
+    #[arg(long, value_name = "BYTES")]
+    fs_max_write_bytes: Option<u64>,
     /// Maximum linear memory in bytes.
     #[arg(long, value_name = "BYTES")]
     max_memory: Option<u64>,
@@ -46,8 +76,10 @@ pub struct RunArgs {
     /// is unmetered.
     #[arg(long, value_name = "N")]
     fuel: Option<u64>,
-    /// Wall-clock timeout per invocation in milliseconds. Without --fuel and without
-    /// --timeout-ms there is no CPU bound at all: a runaway guest runs until it is killed.
+    /// Wall-clock timeout per invocation in milliseconds; 0 = none. Without --fuel and
+    /// without --timeout-ms there is no CPU bound at all: a runaway guest runs until it is
+    /// killed. Network waits (`orbit:net/v1`) count against it: a server that blocks in
+    /// accept needs `0` or no flag.
     #[arg(long, value_name = "MS")]
     timeout_ms: Option<u64>,
     /// Tenant id attached to the isolate's log records.
@@ -64,8 +96,52 @@ pub fn registry() -> CapabilityRegistry {
         .with(LogCapability::new(StderrSink))
         .with(clock)
         .with(RandomCapability::new())
+        .with(NetCapability::new())
         .with(KvCapability::new(InMemoryKv::new()))
         .with(wasi)
+        .with(FsCapability::new())
+        .with(ProcessCapability::new().with_stdin(HostStdin::new()))
+}
+
+/// Parses `/guest=./host[:ro|:rw]` (the part after `fs:`).
+fn parse_mount(spec: &str) -> Result<(String, PathBuf, MountMode)> {
+    let (guest, rest) = spec
+        .split_once('=')
+        .with_context(|| format!("bad --grant `fs:{spec}`: expected fs:/guest=./host[:ro|:rw]"))?;
+    let (host, mode) = match rest.rsplit_once(':') {
+        Some((h, "ro")) => (h, MountMode::ReadOnly),
+        Some((h, "rw")) => (h, MountMode::ReadWrite),
+        _ => (rest, MountMode::ReadOnly),
+    };
+    let host = std::fs::canonicalize(host)
+        .with_context(|| format!("bad --grant `fs:{spec}`: cannot open host directory"))?;
+    if !host.is_dir() {
+        bail!("bad --grant `fs:{spec}`: host path is not a directory");
+    }
+    Ok((guest.to_owned(), host, mode))
+}
+
+fn process_config(args: &RunArgs, stdin: bool) -> Result<serde_json::Value> {
+    let name = args
+        .module
+        .file_stem()
+        .map_or_else(|| "main".to_owned(), |s| s.to_string_lossy().into_owned());
+    let mut g = ProcessGrant::new()
+        .args(std::iter::once(name).chain(args.app_args.iter().cloned()))
+        .stdin(stdin);
+    for kv in &args.env {
+        let (k, v) = kv
+            .split_once('=')
+            .filter(|(k, _)| !k.is_empty())
+            .with_context(|| format!("bad --env `{kv}`: expected K=V"))?;
+        g = g.env(k, v);
+    }
+    for k in &args.env_pass {
+        if let Ok(v) = std::env::var(k) {
+            g = g.env(k.as_str(), v);
+        }
+    }
+    Ok(g.to_config())
 }
 
 fn wasi_config(args: &RunArgs) -> Result<serde_json::Value> {
@@ -85,13 +161,50 @@ fn wasi_config(args: &RunArgs) -> Result<serde_json::Value> {
 /// Runs the module; returns the process exit code (the guest's `proc_exit` code, else 0).
 pub async fn run(args: RunArgs) -> Result<i32> {
     let mut grants = Grants::none();
+    let (mut net_listen, mut net_connect) = (args.listen.clone(), Vec::new());
+    let mut mounts = Vec::new();
+    let mut fs_plain = false;
+    let mut stdin = false;
+    let mut process_plain = false;
     for g in &args.grants {
+        if let Some((kind, scope)) = g
+            .strip_prefix("net:")
+            .and_then(|r| r.split_once('='))
+            .filter(|(k, _)| matches!(*k, "listen" | "connect"))
+        {
+            orbit_caps::NetScope::parse(scope).map_err(|e| anyhow::anyhow!("bad --grant: {e}"))?;
+            if kind == "listen" {
+                net_listen.push(scope.to_owned());
+            } else {
+                net_connect.push(scope.to_owned());
+            }
+            continue;
+        }
+        if let Some(spec) = g.strip_prefix("fs:") {
+            mounts.push(parse_mount(spec)?);
+            continue;
+        }
+        if let Some(what) = g.strip_prefix("process:") {
+            if what != "stdin" {
+                bail!("bad --grant `{g}`: expected process:stdin");
+            }
+            stdin = true;
+            continue;
+        }
         let id: CapabilityId = g.parse().with_context(|| format!("bad --grant `{g}`"))?;
         if orbit_abi::spec(&id).is_none() {
             bail!(
                 "bad --grant `{g}`: no such capability in ABI v{}",
                 orbit_abi::ABI_VERSION
             );
+        }
+        if id == CapabilityId::fs_v1() {
+            fs_plain = true;
+            continue;
+        }
+        if id == CapabilityId::process_v1() {
+            process_plain = true;
+            continue;
         }
         grants = if id == CapabilityId::kv_v1() {
             grants.grant_with(id, serde_json::json!({ "namespaces": args.kv_namespaces }))
@@ -100,6 +213,50 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         } else {
             grants.grant(id)
         };
+    }
+    for scope in &args.listen {
+        orbit_caps::NetScope::parse(scope).map_err(|e| anyhow::anyhow!("bad --listen: {e}"))?;
+    }
+    if !net_listen.is_empty() || !net_connect.is_empty() {
+        grants = grants.grant_with(
+            CapabilityId::net_v1(),
+            net_grant_config(&net_listen, &net_connect),
+        );
+    }
+    let fs_flags =
+        args.cwd.is_some() || args.fs_max_handles.is_some() || args.fs_max_write_bytes.is_some();
+    if fs_flags && mounts.is_empty() && !fs_plain {
+        bail!("--cwd/--fs-max-* require --grant fs:/guest=./host or --grant fs/v1");
+    }
+    if !mounts.is_empty() || fs_plain {
+        let mut fg = FsGrant::new();
+        for (g, h, m) in mounts {
+            fg = fg.mount(&g, h, m);
+        }
+        if let Some(c) = &args.cwd {
+            fg = fg.cwd(c);
+        }
+        if let Some(n) = args.fs_max_handles {
+            fg = fg.max_handles(n);
+        }
+        if let Some(n) = args.fs_max_write_bytes {
+            fg = fg.max_write_bytes(n);
+        }
+        grants = grants.grant_with(
+            CapabilityId::fs_v1(),
+            fg.to_config()
+                .map_err(|e| anyhow::anyhow!("bad fs grant: {e}"))?,
+        );
+    }
+    // process/v1 is granted by --app-arg, --env, --env-pass, --grant process:stdin and
+    // --grant process/v1; without one of them the module cannot link it.
+    if process_plain
+        || stdin
+        || !args.app_args.is_empty()
+        || !args.env.is_empty()
+        || !args.env_pass.is_empty()
+    {
+        grants = grants.grant_with(CapabilityId::process_v1(), process_config(&args, stdin)?);
     }
     let wasi_flags = !args.wasi_args.is_empty() || !args.wasi_env.is_empty();
     if wasi_flags && !grants.contains(&CapabilityId::wasi_p1_v1()) {
@@ -113,7 +270,12 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         limits.max_memory_bytes = m;
     }
     limits.fuel = args.fuel;
-    limits.timeout = args.timeout_ms.map(Duration::from_millis);
+    // `--timeout-ms 0` means no wall-clock deadline at all (a server waiting in `accept`
+    // must not be killed by it); so does leaving the flag out.
+    limits.timeout = args
+        .timeout_ms
+        .filter(|ms| *ms > 0)
+        .map(Duration::from_millis);
 
     let bytes = std::fs::read(&args.module)
         .with_context(|| format!("cannot read {}", args.module.display()))?;

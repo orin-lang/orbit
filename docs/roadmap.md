@@ -18,16 +18,29 @@ admission control, metrics, `orbit` CLI, integration tests, Criterion benchmarks
 3. `orbit_alloc` and byte payloads for invocations (host-to-guest buffers).
 
 ## Milestone 3 — density and warm reuse
-1. Wasmtime pooling allocator tuned per deployment class; copy-on-write memory images (`memory-init-cow`).
-2. Instance pools: pre-initialised idle instances per artifact, reset policy (fresh store per request vs reuse with
-   state wiped), configurable per deployment.
-3. Precompiled artifact store on disk (`Engine::precompile_module`, versioned by engine config hash).
-4. Scale-to-zero: evict idle isolates by LRU under memory pressure.
+1. ~~Wasmtime pooling allocator tuned per deployment class; copy-on-write memory images~~ **done**: `PoolingConfig`
+   exposes max instances, memory slot size, table elements, tables per instance and keep-resident bytes, with `density`
+   and `latency` presets; copy-on-write images are Wasmtime's default (`memory_init_cow`) where the OS supports them and
+   the whole suite also passes with it off. Per-class numbers: [benchmarks.md](benchmarks.md).
+2. ~~Instance pools~~ **done** ([ADR-0009](adr/0009-instance-pools-fresh-by-default.md)): pre-initialised idle isolates
+   per (artifact, tenant, grants, limits), `FreshPerAcquire` by default, opt-in `Reuse { max_uses }`, prewarm, `min_idle`
+   refill. State is *not* wiped under `Reuse` (no sound way to); that is documented, not hidden.
+3. Precompiled artifact store on disk (`Engine::precompile_module`, versioned by engine config hash). **Not done**:
+   loading precompiled code needs `Module::deserialize`, which is `unsafe`; the workspace forbids unsafe code, so this
+   needs an audited unsafe boundary first.
+4. ~~Scale-to-zero: evict idle isolates by LRU under memory pressure~~ **done**: `idle_timeout` eviction down to
+   `min_idle` (0 allowed) and `Runtime::reclaim_idle`, called automatically when a spawn fails admission.
 
-## Milestone 4 — event dispatch
-1. An `Invocation` abstraction: HTTP request, message, timer, batch chunk; one dispatcher API for all.
-2. `orbit:http/v1` (incoming handler + outgoing client behind a host-managed connection pool).
-3. Timers and scheduling (`orbit:timer/v1`), streaming bodies with zero-copy where Wasmtime allows.
+## Milestone 4 — network and event dispatch
+Revised: unchanged Orin `std:net` / `std:http` code must run, so Orbit offers the L0 network layer rather than an event
+ABI ([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)).
+1. ~~`orbit:net/v1`~~ **done**: TCP listen/accept/connect/recv/send, DNS, wake sources, scope grants, async waits.
+   `orbit run app.wasm --listen 127.0.0.1:8080` serves with a guest-written server.
+2. `orbit:thread/v1` (several guest threads of one isolate on a shared memory) so one isolate serves connections
+   concurrently; the network state is already per isolate, not per store.
+3. TLS and UDP; `poll` over several sockets; outgoing connection pool behind `connect`.
+4. An `Invocation` abstraction and timers (`orbit:timer/v1`) for batch/message workloads (the `orbit_alloc` export stays
+   reserved for it).
 
 ## Milestone 5 — infrastructure adapters
 Filesystem (in-memory, restricted local subtree, temp), object storage (S3-compatible), PostgreSQL (one shared pool

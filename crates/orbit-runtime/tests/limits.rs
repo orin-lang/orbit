@@ -215,6 +215,7 @@ async fn pooling_allocator_enforces_the_same_limits() {
             pooling: Some(PoolingConfig {
                 max_instances: 8,
                 max_memory_bytes: 4 * 1024 * 1024,
+                ..PoolingConfig::default()
             }),
             ..EngineConfig::default()
         },
