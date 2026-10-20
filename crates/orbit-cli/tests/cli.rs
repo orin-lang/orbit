@@ -38,6 +38,50 @@ fn run_denies_capabilities_by_default() {
 }
 
 #[test]
+fn log_format_plain_splits_streams_and_tagged_goes_to_stderr() {
+    let wasm = caps_fixture("wasi_hello.wasm");
+    let plain = orbit(&["run", &wasm, "--grant", "wasi_p1/v1"]);
+    assert!(plain.status.success(), "{}", stderr(&plain));
+    assert!(stdout(&plain).contains("hello from wasi"));
+    assert!(stderr(&plain).contains("this goes to stderr"));
+    assert!(!stdout(&plain).contains("[info]") && !stderr(&plain).contains("[warn]"));
+
+    let tagged = orbit(&[
+        "run",
+        &wasm,
+        "--grant",
+        "wasi_p1/v1",
+        "--log-format",
+        "tagged",
+    ]);
+    assert!(tagged.status.success(), "{}", stderr(&tagged));
+    assert!(!stdout(&tagged).contains("hello from wasi"));
+    assert!(stderr(&tagged).contains("[info] cli/i-1: hello from wasi"));
+    assert!(stderr(&tagged).contains("[warn] cli/i-1: this goes to stderr"));
+}
+
+#[test]
+fn log_format_plain_sends_error_level_to_stderr_unprefixed() {
+    let base = ["run", "", "--grant", "log/v1", "--invoke", "levels"];
+    let wat = path("levels.wat");
+    let mut args = base.to_vec();
+    args[1] = &wat;
+    let o = orbit(&args);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "out-line\nout-line\n0\n");
+    assert_eq!(stderr(&o), "err-line\n");
+
+    args.extend(["--log-format", "tagged"]);
+    let o = orbit(&args);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "0\n");
+    assert_eq!(
+        stderr(&o),
+        "[debug] cli/i-1: out-line\n[error] cli/i-1: err-line\n[info] cli/i-1: out-line\n"
+    );
+}
+
+#[test]
 fn run_with_grant_logs_to_stderr() {
     let o = orbit(&[
         "run",
@@ -48,6 +92,8 @@ fn run_with_grant_logs_to_stderr() {
         "hello",
         "--tenant",
         "acme",
+        "--log-format",
+        "tagged",
     ]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(
@@ -269,11 +315,7 @@ fn wasi_requires_its_own_grant() {
 fn wasi_command_module_runs_start_and_exits_with_the_guest_code() {
     let o = orbit(&["run", &path("command.wat"), "--grant", "wasi_p1/v1"]);
     assert_eq!(o.status.code(), Some(9), "{}", stderr(&o));
-    assert!(
-        stderr(&o).contains("[info] cli/i-1: command"),
-        "{}",
-        stderr(&o)
-    );
+    assert_eq!(stdout(&o).trim(), "command", "{}", stderr(&o));
     // --invoke runs that export instead of `_start`.
     let o = orbit(&[
         "run",
@@ -292,9 +334,10 @@ fn rust_program_gets_args_env_and_exit_code() {
     let wasm = caps_fixture("wasi_hello.wasm");
     let o = orbit(&["run", &wasm, "--grant", "wasi_p1/v1"]);
     assert!(o.status.success(), "{}", stderr(&o));
-    assert!(stderr(&o).contains("[info] cli/i-1: hello from wasi"));
-    assert!(stderr(&o).contains(r#"args=["main"]"#));
-    assert!(stderr(&o).contains("[warn] cli/i-1: this goes to stderr"));
+    assert!(stdout(&o).contains("hello from wasi"));
+    assert!(stdout(&o).contains(r#"args=["main"]"#));
+    assert!(stderr(&o).contains("this goes to stderr"));
+    assert!(!stderr(&o).contains("[warn]"));
 
     let o = orbit(&[
         "run",
@@ -307,7 +350,7 @@ fn rust_program_gets_args_env_and_exit_code() {
         "3",
     ]);
     assert_eq!(o.status.code(), Some(3), "{}", stderr(&o));
-    assert!(stderr(&o).contains(r#"args=["main", "exit", "3"]"#));
+    assert!(stdout(&o).contains(r#"args=["main", "exit", "3"]"#));
 
     let o = orbit(&[
         "run",
@@ -321,7 +364,7 @@ fn rust_program_gets_args_env_and_exit_code() {
     ]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert!(
-        stderr(&o).contains(r#"env=[("K", "v=1")]"#),
+        stdout(&o).contains(r#"env=[("K", "v=1")]"#),
         "{}",
         stderr(&o)
     );
@@ -357,7 +400,7 @@ fn rust_system_time_fails_without_the_clock_grant() {
     with_clock.extend(["--grant", "clock/v1"]);
     let o = orbit(&with_clock);
     assert!(o.status.success(), "{}", stderr(&o));
-    assert!(stderr(&o).contains("unix_secs="), "{}", stderr(&o));
+    assert!(stdout(&o).contains("unix_secs="), "{}", stderr(&o));
 }
 
 #[test]
@@ -375,7 +418,7 @@ fn c_program_runs_through_the_cli() {
         "GREETING=hello",
     ]);
     assert_eq!(o.status.code(), Some(4), "{}", stderr(&o));
-    assert!(stderr(&o).contains("GREETING=hello"), "{}", stderr(&o));
+    assert!(stdout(&o).contains("GREETING=hello"), "{}", stderr(&o));
 }
 
 #[test]

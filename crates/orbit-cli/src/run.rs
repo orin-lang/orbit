@@ -5,11 +5,30 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use orbit_abi::CapabilityId;
 use orbit_caps::{
-    ClockCapability, FsCapability, FsGrant, HostStdin, InMemoryKv, KvCapability, LogCapability,
-    MountMode, NetCapability, ProcessCapability, ProcessGrant, RandomCapability, StderrSink,
-    ThreadCapability, WasiCapability, net_grant_config,
+    ClockCapability, ConsoleFormat, ConsoleSink, FsCapability, FsGrant, HostStdin, InMemoryKv,
+    KvCapability, LogCapability, MountMode, NetCapability, ProcessCapability, ProcessGrant,
+    RandomCapability, ThreadCapability, WasiCapability, net_grant_config,
 };
 use orbit_runtime::{CapabilityRegistry, ExecError, Grants, Limits, Runtime, RuntimeConfig};
+
+/// How guest log records are printed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum LogFormat {
+    /// The message only: debug and info to stdout, warn and error to stderr.
+    #[default]
+    Plain,
+    /// `[level] tenant/instance: message` on stderr.
+    Tagged,
+}
+
+impl From<LogFormat> for ConsoleFormat {
+    fn from(f: LogFormat) -> Self {
+        match f {
+            LogFormat::Plain => Self::Plain,
+            LogFormat::Tagged => Self::Tagged,
+        }
+    }
+}
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -92,15 +111,21 @@ pub struct RunArgs {
     /// Tenant id attached to the isolate's log records.
     #[arg(long, default_value = "cli", value_name = "ID")]
     tenant: String,
+    /// How guest log records (and WASI stdout/stderr) are printed. `plain`: the message only,
+    /// debug and info on stdout, warn and error on stderr, like a native program. `tagged`:
+    /// `[level] tenant/instance: message` on stderr.
+    #[arg(long, value_enum, default_value_t = LogFormat::Plain, value_name = "FORMAT")]
+    log_format: LogFormat,
 }
 
 /// The capabilities this binary can serve.
-pub fn registry() -> CapabilityRegistry {
+pub fn registry(log_format: LogFormat) -> CapabilityRegistry {
+    let sink = ConsoleSink::new(log_format.into());
     let clock = ClockCapability::system();
-    // WASI clocks read the same source as `orbit:clock/v1`; guest stdout/stderr go to stderr.
-    let wasi = WasiCapability::new(StderrSink).with_clock(&clock);
+    // WASI clocks read the same source as `orbit:clock/v1`; guest stdout/stderr go to the same sink.
+    let wasi = WasiCapability::new(sink).with_clock(&clock);
     CapabilityRegistry::new()
-        .with(LogCapability::new(StderrSink))
+        .with(LogCapability::new(sink))
         .with(clock)
         .with(RandomCapability::new())
         .with(NetCapability::new())
@@ -308,7 +333,7 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         .with_context(|| format!("cannot read {}", args.module.display()))?;
     let mut config = RuntimeConfig::default();
     config.engine.fuel_metering = args.fuel.is_some();
-    let runtime = Runtime::new(config, registry())?;
+    let runtime = Runtime::new(config, registry(args.log_format))?;
     let artifact = runtime.load(&bytes).context("load failed")?;
     let mut isolate = runtime
         .spawn_isolate(&artifact, args.tenant.as_str(), &grants, limits)

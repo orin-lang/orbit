@@ -7,7 +7,10 @@ use orbit_runtime::{ModuleInfo, Runtime, RuntimeConfig, hash_hex};
 
 pub fn inspect(path: &Path) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-    let runtime = Runtime::new(RuntimeConfig::default(), crate::run::registry())?;
+    let runtime = Runtime::new(
+        RuntimeConfig::default(),
+        crate::run::registry(crate::run::LogFormat::Plain),
+    )?;
     let info = ModuleInfo::inspect(runtime.engine(), &bytes).context("not a valid module")?;
 
     println!("module:   {}", path.display());

@@ -14,6 +14,9 @@ cargo test --workspace
 cargo bench -p orbit-runtime
 ```
 
+`orbit run` prints guest output like a native program: the bare message, info on stdout, warn and error on stderr.
+Pass `--log-format tagged` for `[level] tenant/instance: message` lines on stderr.
+
 | Crate | Role |
 |---|---|
 | `orbit-abi` | versioned host ABI: capability ids, signatures, status codes, manifest (no engine dependency) |

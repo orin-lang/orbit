@@ -70,6 +70,10 @@ How Orbit honours it ([host-abi.md](host-abi.md) section 5):
 
 * `orbit run module.wasm` on a module that exports `orin_main` (and no `_start`, no `--invoke`) calls `orin_main` and
   exits with its result (a non-zero status that wraps to 0 modulo 256 becomes 1, as for `proc_exit`).
+* Output behaves like a native program by default (`--log-format plain`): guest log records print as the bare message,
+  debug and info (Orin stdout) on the process stdout, warn and error (Orin stderr) on stderr, flushed per line. Use
+  `--log-format tagged` for `[level] tenant/instance: message` lines on stderr. CLI errors and trap reports always go
+  to stderr unchanged.
 * If `orin_main` traps, the CLI calls `orin_exit_status` once (library: `Isolate::post_mortem_i32`) under a small fresh
   budget. A status other than `-1` is the exit status, and the trap message is still printed to stderr. `-1`, a missing
   export or a failing call mean a genuine trap: the original trap is reported and the exit status is 1.
