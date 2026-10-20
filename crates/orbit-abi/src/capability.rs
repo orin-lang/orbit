@@ -157,6 +157,16 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
         wasm32_only: false,
     },
     CapabilitySpec {
+        name: "queue",
+        major: 1,
+        funcs: &[
+            mem_sig("publish", &[I64, I64, I64, I64], &[I32]),
+            mem_sig("publish_batch", &[I64, I64, I64, I64], &[I32]),
+        ],
+        module: None,
+        wasm32_only: false,
+    },
+    CapabilitySpec {
         name: "net",
         major: 1,
         funcs: NET_FUNCS,
@@ -179,6 +189,10 @@ pub static CAPABILITIES: &[CapabilitySpec] = &[
             sig("dir_close", &[I64], &[I32]),
             mem_sig("realpath", &[I64, I64, I64, I64], &[I64]),
             mem_sig("cwd", &[I64, I64], &[I64]),
+            sig("sync", &[I64], &[I32]),
+            mem_sig("rename", &[I64, I64, I64, I64], &[I32]),
+            mem_sig("remove_file", &[I64, I64], &[I32]),
+            mem_sig("remove_dir", &[I64, I64], &[I32]),
         ],
         module: None,
         wasm32_only: false,
@@ -323,6 +337,12 @@ impl CapabilityId {
     #[must_use]
     pub fn kv_v1() -> Self {
         Self::new("kv", 1)
+    }
+
+    /// `orbit:queue/v1`.
+    #[must_use]
+    pub fn queue_v1() -> Self {
+        Self::new("queue", 1)
     }
 
     /// `orbit:net/v1`.
@@ -481,7 +501,7 @@ mod tests {
         assert_eq!(s.func("get").unwrap().params.len(), 5);
         assert!(import_module("orbit:kv/v2").is_none());
         assert!(import_module("env").is_none());
-        assert_eq!(CAPABILITIES.len(), 9);
+        assert_eq!(CAPABILITIES.len(), 10);
         assert_eq!(s.func("close").unwrap().to_string(), "close(i64) -> i32");
     }
 

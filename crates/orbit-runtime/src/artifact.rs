@@ -458,7 +458,7 @@ impl Artifact {
     }
 
     /// The shared memory the module imports as `env.memory`, if it is a threaded module (it
-    /// then runs on a memory Orbit creates per isolate; see `docs/host-abi.md` section 4e).
+    /// then runs on a memory Orbit creates per isolate; see `docs/host-abi.md` section 4f).
     #[must_use]
     pub fn shared_memory(&self) -> Option<SharedMemoryDecl> {
         self.shared_memory

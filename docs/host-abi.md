@@ -1,8 +1,8 @@
 # Orbit host ABI, version 1
 
-Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1),
+Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1), `orbit:queue/v1`,
 `wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a), then `orbit:fs/v1`, `orbit:process/v1` and
-`orbit:net/v1` (milestone 3, sections 4b to 4d), and `orbit:thread/v1` (guest threads, section 4e).
+`orbit:net/v1` (milestone 3, sections 4b to 4d), and `orbit:thread/v1` (guest threads, section 4f).
 Everything marked *reserved* is a design, not a feature.
 
 This document is the contract between a guest module (an Orin program compiled to WebAssembly, or any other module)
@@ -54,6 +54,7 @@ Functions return `i32` status codes, or an `i64` whose negative values are statu
 | -14 | `ERR_IS_DIR` | the path names a directory where a file is needed |
 | -15 | `ERR_REFUSED` | the peer refused the connection (net `tcp_connect`) |
 | -16 | `ERR_ADDR_IN_USE` | the address is already in use (net `tcp_listen`) |
+| -17 | `ERR_NOT_EMPTY` | the directory is not empty (fs `remove_dir`, `rename` onto a directory) |
 
 ## 4. Capabilities in version 1
 
@@ -169,7 +170,15 @@ dir_next(h: i64, out_ptr: i64, out_cap: i64) -> i64      // name length | 0x4000
 dir_close(h: i64) -> i32
 realpath(path_ptr: i64, path_len: i64, out_ptr: i64, out_cap: i64) -> i64   // length of the virtual canonical path
 cwd(out_ptr: i64, out_cap: i64) -> i64                   // length of the virtual working directory (absolute)
+sync(h: i64) -> i32                                      // flush a write handle's data to stable storage (fsync)
+rename(from_ptr: i64, from_len: i64, to_ptr: i64, to_len: i64) -> i32   // replaces an existing `to` atomically
+remove_file(path_ptr: i64, path_len: i64) -> i32         // a file or symbolic link, never a directory
+remove_dir(path_ptr: i64, path_len: i64) -> i32          // an empty directory
 ```
+
+`sync`, `rename`, `remove_file` and `remove_dir` were added to v1 (section 1: functions may be added) so that Orin's
+`std:fs` `rename`, `removeFile`, `removeDir` and `writeFileAtomic` run unchanged; a guest that imports them needs a host
+that has them.
 
 **Authority is the mounts in the grant.** A mount binds a virtual absolute path to a host directory, read-only or
 read-write. CLI: `--grant fs:/data=./hostdir:ro` (`:rw` for write; read-only if the suffix is omitted; repeatable,
@@ -205,6 +214,16 @@ mount names, `open` is `ERR_IS_DIR`.
 * `realpath`: the longest existing prefix with symlinks resolved, then the non-existing rest unchanged; the result is a
   **virtual** path (never a host path). `ERR_NOT_FOUND` if the first missing component is a dangling symlink, `ERR_DENIED`
   for an escaping link.
+* `rename`, `remove_file`, `remove_dir` act on the **name**: the last component is not followed, so a symbolic link is
+  renamed or removed itself and its target is untouched; the directory part is confined like every other path (a link
+  that leaves the mount is `ERR_DENIED`). Every path must lie in a **read-write** mount and must not be the mount itself
+  or a virtual ancestor (`ERR_DENIED`, before any OS call). Both `rename` paths must be in the **same** mount; across
+  mounts it is `ERR_IO`, like `EXDEV` across file systems. An existing `to` is replaced atomically (POSIX `rename`); a
+  non-empty directory at `to` is `ERR_NOT_EMPTY`. `remove_file` on a directory is `ERR_IS_DIR` on every host;
+  `remove_dir` on a file or link is `ERR_NOT_DIR`, on a non-empty directory `ERR_NOT_EMPTY`.
+* `sync` calls `fsync` on a write handle; on a read handle it is a no-op (`OK`), on a directory handle `ERR_INVALID`.
+  An atomic replacement is `open(tmp, 1)`, `write` loop, `sync`, `close`, `rename(tmp, path)`; the rename is atomic, but
+  the directory entry itself is not synced (there is no directory `sync`).
 * Handles (files and directories) live in the per-instance `HandleTable`; a stale, forged or foreign handle is
   `ERR_BAD_HANDLE`; a handle of the wrong kind (`dir_next` on a file) is `ERR_INVALID`.
 
@@ -305,7 +324,31 @@ wait on it is still running in another call is released when that wait ends.
 
 All of it works with 32-bit and 64-bit memories.
 
-## 4e. `orbit:thread/v1`: guest threads on a shared memory
+## 4e. `orbit:queue/v1`: publish to named queues
+
+Fire-and-forget message publishing behind a host adapter (`QueueBackend`; the embedder implements it, `InMemoryQueue`
+is for tests). Publish-only and handle-free: receiving is the embedder's business (it delivers messages to its own
+consumers), not a guest call.
+
+```
+publish(q_ptr: i64, q_len: i64, body_ptr: i64, body_len: i64) -> i32
+publish_batch(q_ptr: i64, q_len: i64, buf_ptr: i64, buf_len: i64) -> i32
+```
+
+* **Grant config `{"publish": ["orders", ...]}`, deny by default**: no config, an empty list or a queue not in the list
+  is `ERR_DENIED`. The grant is checked before the message is read.
+* A queue name is 1 to 255 bytes of UTF-8 (`ERR_INVALID` for empty or invalid UTF-8, `ERR_TOO_LARGE` for longer). A
+  message is 0 bytes to 1 MiB (`ERR_TOO_LARGE`).
+* `publish_batch` takes repeated frames of `u32` little-endian length followed by that many bytes: 1 to 256 messages,
+  at most 8 MiB framed. A truncated frame, trailing bytes or an empty batch is `ERR_INVALID`; an oversized frame or
+  too many messages is `ERR_TOO_LARGE`. Nothing is published unless the whole buffer parses. The batch is atomic if
+  the backend's `publish_batch` is (the default implementation publishes one by one).
+* `OK` means the backend accepted the message. A full queue or exhausted tenant quota is `ERR_QUOTA` (retry later may
+  succeed); a backend failure is `ERR_IO`. Delivery to consumers is at-least-once at best and is the backend's contract.
+* The tenant comes from the host and is part of every backend call: two tenants publishing to `"orders"` never share a
+  queue.
+
+## 4f. `orbit:thread/v1`: guest threads on a shared memory
 
 Several threads of one isolate run truly in parallel, as wasi-threads does. wasm32 only. Design: [ADR-0012](adr/0012-guest-threads-on-shared-memory.md).
 
@@ -376,7 +419,7 @@ poolable with `ReusePolicy::FreshPerAcquire` (`Reuse` is refused: `ThreadsCannot
 | `_start` | no | WASI command entry point; `orbit run` without `--invoke` calls it and exits with the guest's `proc_exit` code (0 if it returns) |
 | `orin_main() -> i32` | no | Orin convention ([orin-integration.md](orin-integration.md) section 2a): the program entry point. `orbit run` without `--invoke` and without `_start` calls it and exits with its result (a non-zero status that wraps to 0 modulo 256 becomes 1) |
 | `orin_exit_status() -> i32` | no | Orin convention: after `orin_main` trapped, the exit status the program set, or `-1` for a genuine trap. Read once by `orbit run` (library: `Isolate::post_mortem_i32`) |
-| `orin_thread_start(tid: i64, arg: i64)` | with `orbit:thread/v1` | entry of every spawned thread (section 4e) |
+| `orin_thread_start(tid: i64, arg: i64)` | with `orbit:thread/v1` | entry of every spawned thread (section 4f) |
 | `orbit_init` | no | called once after `_initialize`; a trap or a non-zero `i32` result fails initialisation |
 | any function | — | invocable by name with integer arguments |
 | `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads in a later version. Servers do not need it: an Orin server is a normal program that listens and accepts through `orbit:net/v1` ([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)) |
@@ -410,7 +453,7 @@ At load the host:
 2. rejects every import whose module is not a capability the host knows at that major version: an `orbit:` module, or
    `wasi_snapshot_preview1` for the functions listed in section 4a (arbitrary `env` imports and any other WASI
    function are rejected);
-3. rejects imports that are not functions, except the one shared `env.memory` of section 4e (other imported memories, tables and globals are not part of ABI v1);
+3. rejects imports that are not functions, except the one shared `env.memory` of section 4f (other imported memories, tables and globals are not part of ABI v1);
 4. checks the import's signature against the capability's definition, and that a wasm32-only capability (WASI) is not
    imported by a module with a 64-bit memory;
 5. at instantiation, checks that the instance's grant includes every required capability — a denied capability

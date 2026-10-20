@@ -19,7 +19,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
                                                         │
  orbit-caps ────────────────────────────────────────────┼──────────────────────────────────────────────────
-   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:fs/v1  orbit:process/v1  orbit:thread/v1  wasi_p1/v1
+   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:queue/v1  orbit:fs/v1  orbit:process/v1  orbit:thread/v1  wasi_p1/v1
    adapters     LogSink (stderr, memory)   KvStore (in-memory, tenant-scoped)   ... later: Postgres pool, Kafka, S3
                                                         │
  orbit-abi ─────────────────────────────────────────────┴──────────────────────────────────────────────────
@@ -109,7 +109,7 @@ drops its table.
 
 ## Guest threads
 
-A module that imports a shared `env.memory` is a *threaded* module ([host-abi.md](host-abi.md) section 4e,
+A module that imports a shared `env.memory` is a *threaded* module ([host-abi.md](host-abi.md) section 4f,
 [ADR-0012](adr/0012-guest-threads-on-shared-memory.md)). Its isolate owns one `SharedMemory` and a `ThreadShared`
 (phase, supervisor, quotas). `orbit:thread/v1` `spawn` creates a new Store and instance of the same module on that memory,
 with capability state derived from the spawning thread's through `Capability::thread_state` (shared `Arc`s for net, fs,

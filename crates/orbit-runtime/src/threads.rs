@@ -1,4 +1,4 @@
-//! Guest threads: `orbit:thread/v1` (ADR-0012, `docs/host-abi.md` section 4e).
+//! Guest threads: `orbit:thread/v1` (ADR-0012, `docs/host-abi.md` section 4f).
 //!
 //! A threaded module imports its linear memory as a shared `env.memory`. Orbit creates one
 //! [`SharedMemory`] per isolate, and every guest thread is a **separate instance of the same

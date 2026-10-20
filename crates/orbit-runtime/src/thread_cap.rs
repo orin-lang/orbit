@@ -8,7 +8,7 @@ use wasmtime::{Caller, Linker};
 use crate::capability::{Capability, InstanceInfo};
 use crate::host::HostState;
 
-/// `orbit:thread/v1` (`docs/host-abi.md` section 4e, ADR-0012).
+/// `orbit:thread/v1` (`docs/host-abi.md` section 4f, ADR-0012).
 ///
 /// `spawn(arg)` starts a new guest thread: a new instance of the same module on the isolate's
 /// shared memory, which runs the export `orin_thread_start(tid: i64, arg: i64)` on its own OS
