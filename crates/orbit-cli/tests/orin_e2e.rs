@@ -392,11 +392,10 @@ fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
-/// The guest's log records as printed by the CLI: `[info] cli/i-1: <message>`.
+/// The guest's info records as printed by the CLI in plain mode: the stdout lines.
 fn cli_info(o: &Output) -> Vec<String> {
-    stderr(o)
+    String::from_utf8_lossy(&o.stdout)
         .lines()
-        .filter_map(|l| l.strip_prefix("[info] cli/i-1: "))
         .map(str::to_owned)
         .collect()
 }
@@ -433,7 +432,7 @@ fn cli_run_hello_and_compute() {
             ]);
             assert_eq!(o.status.code(), Some(0), "{name}_{w}: {}", stderr(&o));
             assert_eq!(cli_info(&o), expected_lines(name), "{name}_{w}");
-            assert!(o.stdout.is_empty(), "stdout carries no guest output");
+            assert!(o.stderr.is_empty(), "plain mode: nothing on stderr");
         }
     }
 }
@@ -460,8 +459,8 @@ fn cli_run_exit_codes() {
         assert_eq!(o.status.code(), Some(101), "trap_{w}: {}", stderr(&o));
         assert_eq!(cli_info(&o), ["before the trap"]);
         assert!(
-            stderr(&o).contains("[error]"),
-            "trap message logged: {}",
+            !stderr(&o).is_empty() && !stderr(&o).contains("[error]"),
+            "trap message on plain stderr: {}",
             stderr(&o)
         );
     }

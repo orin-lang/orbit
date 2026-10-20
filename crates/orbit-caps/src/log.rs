@@ -87,6 +87,57 @@ impl LogSink for StderrSink {
     }
 }
 
+/// How [`ConsoleSink`] renders records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConsoleFormat {
+    /// The message only. Trace, debug and info go to standard output; warn and error go to
+    /// standard error.
+    #[default]
+    Plain,
+    /// `[level] tenant/instance: message` on standard error, like [`StderrSink`].
+    Tagged,
+}
+
+/// Writes records to the process console in a [`ConsoleFormat`], flushing after every line.
+/// Write errors (a closed pipe) are ignored.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConsoleSink {
+    format: ConsoleFormat,
+}
+
+impl ConsoleSink {
+    /// A sink using `format`.
+    #[must_use]
+    pub fn new(format: ConsoleFormat) -> Self {
+        Self { format }
+    }
+}
+
+fn emit(mut out: impl std::io::Write, line: &str) {
+    let _ = out.write_all(line.as_bytes());
+    let _ = out.write_all(b"\n");
+    let _ = out.flush();
+}
+
+impl LogSink for ConsoleSink {
+    fn write(&self, r: &LogRecord) {
+        match self.format {
+            ConsoleFormat::Tagged => {
+                emit(
+                    std::io::stderr().lock(),
+                    &format!("[{}] {}/{}: {}", r.level, r.tenant, r.instance, r.message),
+                );
+            }
+            ConsoleFormat::Plain => match r.level {
+                LogLevel::Trace | LogLevel::Debug | LogLevel::Info => {
+                    emit(std::io::stdout().lock(), &r.message);
+                }
+                LogLevel::Warn | LogLevel::Error => emit(std::io::stderr().lock(), &r.message),
+            },
+        }
+    }
+}
+
 /// Collects records in memory; clones share the same buffer. Intended for tests.
 #[derive(Clone, Debug, Default)]
 pub struct MemorySink {
