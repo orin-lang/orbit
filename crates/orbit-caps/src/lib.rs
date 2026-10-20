@@ -22,9 +22,9 @@ pub use fs::{FsCapability, FsGrant, MountMode};
 pub use kv::{InMemoryKv, KvCapability, KvError, KvStore};
 pub use log::{LogCapability, LogLevel, LogRecord, LogSink, MemorySink, StderrSink};
 pub use net::{NetCapability, NetController, NetScope, net_grant_config};
+pub use orbit_runtime::ThreadCapability;
 pub use process::{
     HostStdin, MemoryStdin, ProcessCapability, ProcessGrant, StdinError, StdinProvider, StdinReader,
 };
 pub use random::RandomCapability;
-pub use orbit_runtime::ThreadCapability;
 pub use wasi::WasiCapability;

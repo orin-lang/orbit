@@ -3,7 +3,6 @@
 
 static u32 counter, done, flag, result, release, never, exit_status = 0xffffffffu, secret;
 static u32 last_status, started;
-static u32 mode; /* what thread_main does */
 
 enum { M_COUNT = 1, M_WAIT = 2, M_BLOCK = 3, M_TRAP = 4, M_EXIT = 5, M_SPIN = 6, M_RELEASE = 7,
        M_NOP = 8, M_LOG = 9 };
@@ -13,6 +12,9 @@ static const char hello[] = "hello from a guest thread";
 void thread_main(i64 tid, i64 arg) {
   add(&started, 1);
   notify(&started, 1u << 30);
+  /* The scenario is in the low byte of `arg`, a count in the rest: it cannot race with main. */
+  u32 mode = (u32)(arg & 0xff);
+  arg >>= 8;
   switch (mode) {
   case M_COUNT:
     for (i64 i = 0; i < arg; i++) add(&counter, 1);
@@ -50,10 +52,9 @@ static void join_all(u32 n) { wait_eq(&done, n); }
 
 /* n threads each add `iters` to one atomic counter. */
 EXPORT("count") int count(int n, int iters) {
-  mode = M_COUNT;
   u32 base = ld(&done); /* `done` and `counter` keep their values across invocations */
   for (int i = 0; i < n; i++) {
-    if (orbit_spawn(iters) <= 0) return -1;
+    if (orbit_spawn(M_COUNT | ((i64)iters << 8)) <= 0) return -1;
   }
   join_all(base + (u32)n);
   return (int)ld(&counter);
@@ -61,8 +62,7 @@ EXPORT("count") int count(int n, int iters) {
 
 /* A thread waits for `flag`; main sets it and waits for the answer. */
 EXPORT("wait_notify") int wait_notify(void) {
-  mode = M_WAIT;
-  if (orbit_spawn(0) <= 0) return -1;
+  if (orbit_spawn(M_WAIT) <= 0) return -1;
   st(&flag, 1);
   notify(&flag, 1u << 30);
   wait_eq(&result, 42);
@@ -72,10 +72,9 @@ EXPORT("wait_notify") int wait_notify(void) {
 
 /* Spawns n threads that wait for `release`; returns how many spawns succeeded. */
 EXPORT("spawn_n") int spawn_n(int n) {
-  mode = M_RELEASE;
   int ok = 0;
   for (int i = 0; i < n; i++) {
-    i64 r = orbit_spawn(0);
+    i64 r = orbit_spawn(M_RELEASE);
     if (r > 0) ok++; else st(&last_status, (u32)r);
   }
   st(&release, 1);
@@ -87,19 +86,16 @@ EXPORT("last_status") int get_last_status(void) { return (int)ld(&last_status); 
 
 /* Two blocked threads and one that traps; main blocks forever too. */
 EXPORT("trap_with_blockers") int trap_with_blockers(void) {
-  mode = M_BLOCK;
-  orbit_spawn(0);
-  orbit_spawn(0);
-  mode = M_TRAP;
-  orbit_spawn(0);
+  orbit_spawn(M_BLOCK);
+  orbit_spawn(M_BLOCK);
+  orbit_spawn(M_TRAP);
   wait32(&never, 0, -1);
   return 0;
 }
 
 /* A thread records status 7 and traps (what orin_platform_exit does); main blocks. */
 EXPORT("exit_in_thread") int exit_in_thread(void) {
-  mode = M_EXIT;
-  orbit_spawn(0);
+  orbit_spawn(M_EXIT);
   wait32(&never, 0, -1);
   return 0;
 }
@@ -107,16 +103,14 @@ EXPORT("orin_exit_status") int orin_exit_status(void) { return (int)ld(&exit_sta
 
 /* A thread spins forever; main blocks forever. */
 EXPORT("spin_thread") int spin_thread(void) {
-  mode = M_SPIN;
-  orbit_spawn(0);
+  orbit_spawn(M_SPIN);
   wait32(&never, 0, -1);
   return 0;
 }
 
 /* Main returns while a thread is still blocked: the host must end it. */
 EXPORT("leave_thread_behind") int leave_thread_behind(void) {
-  mode = M_BLOCK;
-  orbit_spawn(0);
+  orbit_spawn(M_BLOCK);
   wait_eq(&started, 1);
   return 5;
 }
@@ -133,32 +127,28 @@ EXPORT("log_main") int log_main(void) {
   return orbit_log(2, (i64)(u32)hello, sizeof hello - 1);
 }
 EXPORT("log_thread") int log_thread(void) {
-  mode = M_LOG;
-  orbit_spawn(0);
+  orbit_spawn(M_LOG);
   join_all(1);
   return 0;
 }
 
 /* One message from main and one from a thread in the same invocation (one shared budget). */
 EXPORT("log_both") int log_both(void) {
-  mode = M_LOG;
   orbit_log(2, (i64)(u32)hello, sizeof hello - 1);
-  orbit_spawn(0);
+  orbit_spawn(M_LOG);
   join_all(1);
   return 0;
 }
 
 /* Spawns one thread that does nothing and waits for it (spawn latency). */
 EXPORT("spawn_join") int spawn_join(int n) {
-  mode = M_NOP;
   for (int i = 0; i < n; i++) {
     u32 before = ld(&done);
-    if (orbit_spawn(0) <= 0) return -1;
+    if (orbit_spawn(M_NOP) <= 0) return -1;
     wait_eq(&done, before + 1);
   }
   return (int)ld(&done);
 }
 EXPORT("spawn_once") i64 spawn_once(void) {
-  mode = M_NOP;
-  return orbit_spawn(0);
+  return orbit_spawn(M_NOP);
 }

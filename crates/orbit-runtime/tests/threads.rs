@@ -7,7 +7,7 @@ use orbit_abi::CapabilityId;
 use orbit_caps::{LogCapability, MemorySink, NetCapability, net_grant_config};
 use orbit_runtime::{
     Artifact, CapabilityRegistry, ExecError, Grants, InstantiateError, Isolate, IsolateState,
-    LoadError, Limits, PoolConfig, ReusePolicy, Runtime, RuntimeConfig, ThreadCapability,
+    Limits, LoadError, PoolConfig, ReusePolicy, Runtime, RuntimeConfig, ThreadCapability,
 };
 
 const THREADS: &[u8] = include_bytes!("fixtures/threads/threads.wasm");
@@ -33,12 +33,10 @@ fn grants() -> Grants {
 }
 
 fn grants_max(n: u64) -> Grants {
-    Grants::none()
-        .grant(CapabilityId::log_v1())
-        .grant_with(
-            CapabilityId::thread_v1(),
-            serde_json::json!({ "max_threads": n }),
-        )
+    Grants::none().grant(CapabilityId::log_v1()).grant_with(
+        CapabilityId::thread_v1(),
+        serde_json::json!({ "max_threads": n }),
+    )
 }
 
 async fn ready(rt: &Runtime, art: &Arc<Artifact>, g: &Grants, limits: Limits) -> Isolate {
@@ -75,10 +73,7 @@ async fn runs_on_a_current_thread_runtime() {
     let (rt, _) = runtime();
     let art = rt.load(THREADS).unwrap();
     let mut iso = ready(&rt, &art, &grants(), Limits::default()).await;
-    assert_eq!(
-        iso.invoke("count", &[3, 1000]).await.unwrap(),
-        vec![3000]
-    );
+    assert_eq!(iso.invoke("count", &[3, 1000]).await.unwrap(), vec![3000]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -176,7 +171,10 @@ async fn leftover_threads_are_terminated_when_main_returns() {
     let art = rt.load(THREADS).unwrap();
     let mut iso = ready(&rt, &art, &grants(), Limits::default()).await;
     let start = Instant::now();
-    assert_eq!(iso.invoke("leave_thread_behind", &[]).await.unwrap(), vec![5]);
+    assert_eq!(
+        iso.invoke("leave_thread_behind", &[]).await.unwrap(),
+        vec![5]
+    );
     assert_quick(start, "leave_thread_behind");
     assert_eq!(iso.state(), IsolateState::Idle);
     assert_eq!(iso.invoke("peek", &[]).await.unwrap(), vec![0]);
@@ -192,7 +190,7 @@ async fn the_memory_limit_applies_to_the_shared_memory() {
     let limits = Limits::default().with_max_memory(64 * 65_536);
     let mut iso = ready(&rt, &art, &grants(), limits).await;
     let start = iso.invoke("size", &[]).await.unwrap()[0];
-    assert!(start >= 1 && start <= 64, "{start}");
+    assert!((1..=64).contains(&start), "{start}");
     assert_eq!(iso.invoke("grow", &[10_000]).await.unwrap(), vec![-1]);
     assert_eq!(iso.invoke("grow", &[1]).await.unwrap(), vec![start]);
     assert_eq!(iso.invoke("grow", &[64 - start]).await.unwrap(), vec![-1]);
@@ -200,7 +198,10 @@ async fn the_memory_limit_applies_to_the_shared_memory() {
 
     // A limit below the module's initial memory is refused at spawn.
     let tiny = Limits::default().with_max_memory(65_536);
-    let err = rt.spawn_isolate(&art, "t", &grants(), tiny).await.unwrap_err();
+    let err = rt
+        .spawn_isolate(&art, "t", &grants(), tiny)
+        .await
+        .unwrap_err();
     assert!(matches!(err, InstantiateError::ResourceLimit(_)), "{err}");
 }
 
@@ -230,7 +231,10 @@ async fn host_functions_work_through_the_shared_memory_in_every_thread() {
     iso.invoke("log_thread", &[]).await.unwrap();
     let recs = sink.records();
     assert_eq!(recs.len(), 2);
-    assert!(recs.iter().all(|r| r.message == "hello from a guest thread"));
+    assert!(
+        recs.iter()
+            .all(|r| r.message == "hello from a guest thread")
+    );
     let m = iso.metrics();
     assert_eq!(m.bytes_logged, 2 * 25);
     assert_eq!(m.host_calls[&CapabilityId::log_v1()], 2);
@@ -252,15 +256,13 @@ async fn a_log_budget_is_shared_by_all_threads() {
 async fn net_handles_opened_in_one_thread_work_in_another() {
     let (rt, _) = runtime();
     let art = rt.load(NET_THREADS).unwrap();
-    let g = Grants::none()
-        .grant(CapabilityId::thread_v1())
-        .grant_with(
-            CapabilityId::net_v1(),
-            net_grant_config(
-                &["127.0.0.1:0-65535".to_owned()],
-                &["127.0.0.1:1-65535".to_owned()],
-            ),
-        );
+    let g = Grants::none().grant(CapabilityId::thread_v1()).grant_with(
+        CapabilityId::net_v1(),
+        net_grant_config(
+            &["127.0.0.1:0-65535".to_owned()],
+            &["127.0.0.1:1-65535".to_owned()],
+        ),
+    );
     let mut iso = ready(&rt, &art, &g, Limits::default()).await;
     let start = Instant::now();
     assert_eq!(iso.invoke("serve_in_thread", &[]).await.unwrap(), vec![4]);
@@ -281,7 +283,11 @@ async fn a_thread_blocked_in_accept_ends_with_the_isolate() {
     let mut iso = ready(&rt, &art, &g, Limits::default()).await;
     let start = Instant::now();
     assert_eq!(iso.invoke("serve_in_thread", &[]).await.unwrap(), vec![-3]);
-    assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -293,7 +299,12 @@ async fn fuel_is_a_budget_per_thread() {
     let limits = Limits::default().with_fuel(5_000_000);
     let mut iso = ready(&rt, &art, &grants(), limits).await;
     assert_eq!(iso.invoke("count", &[2, 1000]).await.unwrap(), vec![2000]);
-    let used = iso.metrics().last_invocation.unwrap().fuel_consumed.unwrap();
+    let used = iso
+        .metrics()
+        .last_invocation
+        .unwrap()
+        .fuel_consumed
+        .unwrap();
     assert!(used > 2 * 1000, "{used}");
     // 3 000 000 iterations in one thread exceed its own 5M budget: the thread runs dry and
     // takes the whole isolate with it.
@@ -306,13 +317,21 @@ async fn a_pool_for_threaded_modules_is_fresh_per_acquire_only() {
     let (rt, _) = runtime();
     let art = rt.load(THREADS).unwrap();
     let reuse = PoolConfig::default().with_reuse(ReusePolicy::Reuse { max_uses: 5 });
-    let err = rt
-        .pool(&art, "t", &grants(), Limits::default(), reuse)
-        .err()
-        .expect("reuse refused");
-    assert!(matches!(err, InstantiateError::ThreadsCannotBeReused), "{err}");
+    let Err(err) = rt.pool(&art, "t", &grants(), Limits::default(), reuse) else {
+        panic!("reuse must be refused");
+    };
+    assert!(
+        matches!(err, InstantiateError::ThreadsCannotBeReused),
+        "{err}"
+    );
     let pool = rt
-        .pool(&art, "t", &grants(), Limits::default(), PoolConfig::default())
+        .pool(
+            &art,
+            "t",
+            &grants(),
+            Limits::default(),
+            PoolConfig::default(),
+        )
         .expect("fresh pool");
     for _ in 0..2 {
         let mut iso = pool.acquire().await.unwrap();
@@ -368,7 +387,9 @@ async fn a_shared_memory_module_without_spawn_needs_no_grant() {
 }
 
 fn load_err(rt: &Runtime, wat: &str) -> String {
-    rt.load(wat.as_bytes()).expect_err("must be rejected").to_string()
+    rt.load(wat.as_bytes())
+        .expect_err("must be rejected")
+        .to_string()
 }
 
 #[tokio::test]
@@ -384,12 +405,18 @@ async fn bad_shapes_are_rejected_at_load() {
     );
     assert!(e.contains("env.other"), "{e}");
     let e = load_err(&rt, r#"(module (memory 1 2 shared))"#);
-    assert!(matches!(
-        rt.load(br#"(module (memory 1 2 shared))"#).unwrap_err(),
-        LoadError::BadSharedMemory(_)
-    ), "{e}");
+    assert!(
+        matches!(
+            rt.load(br#"(module (memory 1 2 shared))"#).unwrap_err(),
+            LoadError::BadSharedMemory(_)
+        ),
+        "{e}"
+    );
     let spawn = r#"(import "orbit:thread/v1" "spawn" (func (param i64) (result i64)))"#;
-    let e = load_err(&rt, &format!(r#"(module {spawn} (memory (export "memory") 1))"#));
+    let e = load_err(
+        &rt,
+        &format!(r#"(module {spawn} (memory (export "memory") 1))"#),
+    );
     assert!(e.contains("shared memory import"), "{e}");
     let e = load_err(
         &rt,
@@ -414,6 +441,9 @@ async fn bad_shapes_are_rejected_at_load() {
     );
     assert!(e.contains("orin_thread_start"), "{e}");
     // 64-bit shared memory is not supported.
-    let e = load_err(&rt, r#"(module (import "env" "memory" (memory i64 1 2 shared)))"#);
+    let e = load_err(
+        &rt,
+        r#"(module (import "env" "memory" (memory i64 1 2 shared)))"#,
+    );
     assert!(e.contains("64-bit"), "{e}");
 }

@@ -224,9 +224,10 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         };
     }
     if thread_seen || args.max_threads.is_some() {
-        let config = args.max_threads.map_or(serde_json::Value::Null, |n| {
-            serde_json::json!({ "max_threads": n })
-        });
+        let config = args.max_threads.map_or(
+            serde_json::Value::Null,
+            |n| serde_json::json!({ "max_threads": n }),
+        );
         grants = grants.grant_with(CapabilityId::thread_v1(), config);
     }
     for scope in &args.listen {

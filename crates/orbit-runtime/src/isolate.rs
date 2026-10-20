@@ -571,7 +571,10 @@ impl Isolate {
                 last_invocation: self.last,
                 invocations: self.invocations,
                 instantiation_latency: self.instantiation_latency,
-                memory_bytes: self.threads.as_ref().map_or(0, |t| t.memory.data_size() as u64),
+                memory_bytes: self
+                    .threads
+                    .as_ref()
+                    .map_or(0, |t| t.memory.data_size() as u64),
                 peak_memory_bytes: 0,
                 memory_grow_denied: 0,
                 table_grow_denied: 0,

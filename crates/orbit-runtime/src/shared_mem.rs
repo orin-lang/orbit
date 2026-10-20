@@ -17,11 +17,7 @@ use wasmtime::SharedMemory;
 /// Copies `out.len()` bytes starting at `offset` out of `mem`. `false` if the range is not
 /// inside the memory's current size.
 pub(crate) fn read(mem: &SharedMemory, offset: usize, out: &mut [u8]) -> bool {
-    let Some(src) = mem
-        .data()
-        .get(offset..)
-        .and_then(|s| s.get(..out.len()))
-    else {
+    let Some(src) = mem.data().get(offset..).and_then(|s| s.get(..out.len())) else {
         return false;
     };
     for (dst, cell) in out.iter_mut().zip(src) {
@@ -37,11 +33,7 @@ pub(crate) fn read(mem: &SharedMemory, offset: usize, out: &mut [u8]) -> bool {
 /// Copies `data` into `mem` starting at `offset`. `false` if the range is not inside the
 /// memory's current size.
 pub(crate) fn write(mem: &SharedMemory, offset: usize, data: &[u8]) -> bool {
-    let Some(dst) = mem
-        .data()
-        .get(offset..)
-        .and_then(|s| s.get(..data.len()))
-    else {
+    let Some(dst) = mem.data().get(offset..).and_then(|s| s.get(..data.len())) else {
         return false;
     };
     for (cell, byte) in dst.iter().zip(data) {

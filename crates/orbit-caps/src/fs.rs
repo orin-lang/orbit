@@ -664,6 +664,8 @@ fn dir_next(
     let Some((name, is_dir)) = pending.clone() else {
         return 0;
     };
+    // The lock is taken again below to clear `pending`.
+    drop(st);
     let flag = if is_dir { FS_DIR_FLAG } else { 0 };
     let r = put_string(caller, &name, ptr, cap, flag);
     if r >= 0

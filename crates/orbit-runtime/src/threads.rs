@@ -42,7 +42,9 @@ use std::time::{Duration, Instant};
 use orbit_abi::{THREAD_START_EXPORT, status};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
-use wasmtime::{Func, InstancePre, SharedMemory, Store, StoreContextMut, Trap, UpdateDeadline, Val};
+use wasmtime::{
+    Func, InstancePre, SharedMemory, Store, StoreContextMut, Trap, UpdateDeadline, Val,
+};
 
 use crate::capability::{Capability, Grants, InstanceInfo};
 use crate::error::ExecError;
@@ -65,7 +67,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 ///
 /// Runs on every epoch tick: ends the store when the isolate is terminating or the absolute
 /// deadline passed, otherwise yields to the executor so a busy guest cannot monopolise it.
-pub(crate) fn epoch_callback(ctx: StoreContextMut<'_, HostState>) -> wasmtime::Result<UpdateDeadline> {
+pub(crate) fn epoch_callback(
+    ctx: StoreContextMut<'_, HostState>,
+) -> wasmtime::Result<UpdateDeadline> {
     let host = ctx.data();
     if host.observe_termination && host.threads.as_ref().is_some_and(|t| t.is_terminating()) {
         return Ok(UpdateDeadline::Interrupt);
@@ -332,8 +336,8 @@ impl ThreadShared {
         let outcome = {
             let run = async {
                 let instance = self.pre.instantiate_async(&mut store).await?;
-                let start = instance
-                    .get_typed_func::<(i64, i64), ()>(&mut store, THREAD_START_EXPORT)?;
+                let start =
+                    instance.get_typed_func::<(i64, i64), ()>(&mut store, THREAD_START_EXPORT)?;
                 start.call_async(&mut store, (tid as i64, arg)).await
             };
             tokio::select! {
@@ -506,7 +510,9 @@ impl ThreadShared {
                 // wake every possible waiter, again and again until the threads are gone.
                 let (g, _) = self
                     .cv
-                    .wait_timeout_while(s, self.grace, |s| (s.live > 0 || s.main_running) && !s.done)
+                    .wait_timeout_while(s, self.grace, |s| {
+                        (s.live > 0 || s.main_running) && !s.done
+                    })
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 s = g;
                 if s.done || (s.live == 0 && !s.main_running) {
@@ -528,7 +534,7 @@ impl ThreadShared {
         while addr + 4 <= size {
             let _ = self.memory.atomic_notify(addr, u32::MAX);
             addr += 4;
-            if addr % (1 << 20) == 0 && {
+            if addr & ((1 << 20) - 1) == 0 && {
                 let s = lock(&self.sync);
                 s.live == 0 && !s.main_running
             } {
