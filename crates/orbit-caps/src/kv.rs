@@ -10,7 +10,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use orbit_abi::{
     CapabilityId,
@@ -105,9 +105,18 @@ impl KvStore for InMemoryKv {
     }
 }
 
-struct KvState {
+/// Threads of an isolate share the namespace list and the handle table.
+struct KvState(Arc<KvShared>);
+
+struct KvShared {
     allowed: Vec<String>,
-    handles: HandleTable<Arc<str>>,
+    handles: Mutex<HandleTable<Arc<str>>>,
+}
+
+fn handles(s: &KvShared) -> MutexGuard<'_, HandleTable<Arc<str>>> {
+    s.handles
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The `orbit:kv/v1` capability.
@@ -140,12 +149,8 @@ impl fmt::Debug for KvCapability {
 
 /// Resolves a handle to its namespace.
 fn namespace_of(host: &mut HostState, id: &CapabilityId, h: i64) -> Result<Arc<str>, i32> {
-    host.cap_state_mut::<KvState>(id)
-        .ok_or(status::ERR_IO)?
-        .handles
-        .get(h)
-        .cloned()
-        .ok_or(status::ERR_BAD_HANDLE)
+    let s = host.cap_state_mut::<KvState>(id).ok_or(status::ERR_IO)?;
+    handles(&s.0).get(h).cloned().ok_or(status::ERR_BAD_HANDLE)
 }
 
 fn open(id: &CapabilityId, caller: &mut Caller<'_, HostState>, ptr: i64, len: i64) -> i64 {
@@ -160,10 +165,10 @@ fn open(id: &CapabilityId, caller: &mut Caller<'_, HostState>, ptr: i64, len: i6
     let Some(state) = caller.data_mut().cap_state_mut::<KvState>(id) else {
         return i64::from(status::ERR_IO);
     };
-    if !state.allowed.contains(&name) {
+    if !state.0.allowed.contains(&name) {
         return i64::from(status::ERR_DENIED);
     }
-    match state.handles.insert(Arc::from(name)) {
+    match handles(&state.0).insert(Arc::from(name)) {
         Ok(h) => h,
         Err(_) => i64::from(status::ERR_QUOTA),
     }
@@ -267,7 +272,7 @@ fn close(id: &CapabilityId, caller: &mut Caller<'_, HostState>, h: i64) -> i32 {
     let Some(state) = caller.data_mut().cap_state_mut::<KvState>(id) else {
         return status::ERR_IO;
     };
-    if state.handles.remove(h).is_some() {
+    if handles(&state.0).remove(h).is_some() {
         status::OK
     } else {
         status::ERR_BAD_HANDLE
@@ -342,9 +347,21 @@ impl Capability for KvCapability {
                     .collect()
             })
             .unwrap_or_default();
-        Box::new(KvState {
+        Box::new(KvState(Arc::new(KvShared {
             allowed,
-            handles: HandleTable::new(info.instance_id.0, KV_MAX_HANDLES),
-        })
+            handles: Mutex::new(HandleTable::new(info.instance_id.0, KV_MAX_HANDLES)),
+        })))
+    }
+
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        match parent.downcast_ref::<KvState>() {
+            Some(s) => Box::new(KvState(Arc::clone(&s.0))),
+            None => self.instance_state(info, config),
+        }
     }
 }

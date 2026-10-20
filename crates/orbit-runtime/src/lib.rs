@@ -33,8 +33,13 @@ mod lifecycle;
 mod limits;
 mod pool;
 mod runtime;
+mod shared_mem;
+mod thread_cap;
+mod threads;
 
-pub use artifact::{Artifact, ContentHash, ExportInfo, ImportInfo, ModuleInfo, hash_hex};
+pub use artifact::{
+    Artifact, ContentHash, ExportInfo, ImportInfo, ModuleInfo, SharedMemoryDecl, hash_hex,
+};
 pub use capability::{Capability, CapabilityRegistry, Grants, InstanceId, InstanceInfo, TenantId};
 pub use engine::{EngineConfig, OrbitEngine, PoolingConfig};
 pub use error::{AdmissionError, EngineError, ExecError, GuestExit, InstantiateError, LoadError};
@@ -45,3 +50,4 @@ pub use lifecycle::{IsolateState, TransitionError};
 pub use limits::Limits;
 pub use pool::{InstancePool, PoolConfig, PoolError, PoolStats, PooledIsolate, ReusePolicy};
 pub use runtime::{Runtime, RuntimeConfig};
+pub use thread_cap::ThreadCapability;

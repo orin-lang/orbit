@@ -192,10 +192,13 @@ impl ProcessGrant {
     }
 }
 
+/// Arguments and environment are immutable and standard input is one stream: threads of an
+/// isolate share all three (`Clone` clones the `Arc`s).
+#[derive(Clone)]
 struct ProcState {
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-    stdin: Option<Box<dyn StdinReader>>,
+    args: Arc<Vec<String>>,
+    env: Arc<BTreeMap<String, String>>,
+    stdin: Option<Arc<Mutex<Box<dyn StdinReader>>>>,
 }
 
 fn state<'a>(host: &'a mut HostState, id: &CapabilityId) -> Option<&'a mut ProcState> {
@@ -315,11 +318,15 @@ impl Capability for ProcessCapability {
                 let Some(s) = state(c.data_mut(), &i) else {
                     return status::ERR_IO.into();
                 };
-                let Some(r) = s.stdin.as_mut() else {
+                let Some(r) = s.stdin.clone() else {
                     return status::ERR_DENIED.into();
                 };
                 // Validate the destination before consuming input.
-                let got = match r.read(&mut buf, timeout) {
+                let got = match r
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .read(&mut buf, timeout)
+                {
                     Ok(g) => g,
                     Err(StdinError::Timeout) => return status::ERR_TIMEOUT.into(),
                     Err(StdinError::Io) => return status::ERR_IO.into(),
@@ -361,7 +368,23 @@ impl Capability for ProcessCapability {
             .stdin
             .as_ref()
             .filter(|_| want_stdin)
-            .map(|p| p.open(info));
-        Box::new(ProcState { args, env, stdin })
+            .map(|p| Arc::new(Mutex::new(p.open(info))));
+        Box::new(ProcState {
+            args: Arc::new(args),
+            env: Arc::new(env),
+            stdin,
+        })
+    }
+
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        match parent.downcast_ref::<ProcState>() {
+            Some(s) => Box::new(s.clone()),
+            None => self.instance_state(info, config),
+        }
     }
 }

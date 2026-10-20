@@ -211,3 +211,17 @@ within the noise of this machine, so these runs do not confirm or refute the Ori
 [orin-integration.md](orin-integration.md) section 2a. Orin `int` is 8 bytes, so this program needs more than the default
 16 MiB memory limit (the sieve alone is 40 MB): with the default limit it traps with `out of memory` (a test pins this).
 One machine, one program: not a comparison with other runtimes.
+
+## Guest threads (`orbit:thread/v1`)
+
+`cargo bench -p orbit-runtime --bench runtime -- threads`, release build, the C fixture `threads.wasm`, default engine
+(on-demand allocator), one machine, criterion's 95% interval:
+
+| Benchmark | Time | What it is |
+|---|---|---|
+| `threads/invoke_size` | 127 us (123 to 130) | one invocation of a threaded isolate that spawns nothing: main thread on its own OS thread plus the supervisor thread |
+| `threads/spawn_join_1` | 271 us (267 to 275) | the same plus one guest `spawn` of a thread that does nothing and waiting for it (new OS thread, Store, instantiation, `orin_thread_start`, exit) |
+| `threads/isolate_spawn_init_terminate` | 143 us (139 to 147) | creating a threaded isolate (shared memory mapping, linker clone, instantiation) and terminating it |
+
+So a spawn costs about 145 us over the invocation baseline (271 - 127), dominated by the OS thread and the instantiation
+of a store; a program that spawns a thread per request pays that, a program with a fixed set of tasks does not.

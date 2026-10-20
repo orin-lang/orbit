@@ -2,7 +2,7 @@
 
 Status: **implemented** for `orbit:log/v1`, `orbit:clock/v1`, `orbit:random/v1`, `orbit:kv/v1` (milestone 1), `orbit:queue/v1`,
 `wasi_p1/v1`, the restricted WASI preview 1 shim (milestone 2, section 4a), then `orbit:fs/v1`, `orbit:process/v1` and
-`orbit:net/v1` (milestone 3, sections 4b to 4d).
+`orbit:net/v1` (milestone 3, sections 4b to 4d), and `orbit:thread/v1` (guest threads, section 4f).
 Everything marked *reserved* is a design, not a feature.
 
 This document is the contract between a guest module (an Orin program compiled to WebAssembly, or any other module)
@@ -348,6 +348,68 @@ publish_batch(q_ptr: i64, q_len: i64, buf_ptr: i64, buf_len: i64) -> i32
 * The tenant comes from the host and is part of every backend call: two tenants publishing to `"orders"` never share a
   queue.
 
+## 4f. `orbit:thread/v1`: guest threads on a shared memory
+
+Several threads of one isolate run truly in parallel, as wasi-threads does. wasm32 only. Design: [ADR-0012](adr/0012-guest-threads-on-shared-memory.md).
+
+```
+spawn(arg: i64) -> i64          tid > 0, or a negative status
+guest export  orin_thread_start(tid: i64, arg: i64)       no result
+```
+
+**Shared memory.** A threaded module imports its memory: `(import "env" "memory" (memory MIN 65536 shared))`
+(`wasm-ld --shared-memory --import-memory --max-memory=4294967296`). Orbit creates one `SharedMemory` per isolate with
+`min` = the declared minimum and `max` = min(declared maximum, `Limits::max_memory_bytes` / 64 KiB) and provides it
+(import subtyping allows the smaller maximum). `memory.grow` past that maximum returns -1 in the guest; the limit
+therefore applies to the memory as a whole. A declared minimum above the limit fails at spawn (`ResourceLimit`).
+Host functions read and write this memory; the module does not need to export `memory`. A module that exports its own
+unshared `memory` is unchanged. **Both shapes are accepted; these are rejected at load**: `env.memory` imported
+unshared or 64-bit, any other `env.*` import, a shared memory the module defines itself, `orbit:thread/v1` without the
+shared import or without an export `orin_thread_start: (i64, i64) -> ()`, an **active data segment** in a module that
+imports `spawn` (every thread instance would apply it again over live memory; wasm-ld emits passive segments with
+`--shared-memory`), and `spawn` together with `wasi_snapshot_preview1` (its state is per instance).
+
+**Grant.** Deny by default: without `--grant thread/v1` the isolate cannot be created (`capability not granted`).
+Grant configuration `{"max_threads": N}` (CLI `--max-threads N`; default 64, ceiling 1024) is the number of spawned
+threads alive at once, not counting the main thread. `spawn` returns `ERR_QUOTA` at the limit (and when the OS refuses a
+thread), `ERR_DENIED` for `max_threads` 0, `ERR_CANCELLED` once the isolate is terminating. A finished thread frees its slot;
+tids increase and are not reused.
+
+**A thread.** `spawn` builds a new instance of the same module on the same memory, in its **own Store** and **its own OS
+thread** (a thread may block in `memory.atomic.wait32`, which blocks its OS thread; it never occupies a Tokio worker), and
+calls `orin_thread_start(tid, arg)`. The host runs no `_initialize` / `orbit_init` for it. Wasmtime always runs the
+start section on instantiation: with wasm-ld that is `__wasm_init_memory`, guarded by an atomic flag, so in a thread
+instance it only observes "done" (and drops its own copy of the passive segments); a hand-written start function must be
+idempotent. Each instance has its own globals, table and **stack pointer**: `orin_thread_start` must switch to a private
+stack (and run `__wasm_init_tls`) before it does anything else. The main thread is the caller of `init` / `invoke`; it
+also runs on a dedicated OS thread, so a threaded isolate never blocks an executor worker.
+
+**State.** Capability state is per isolate and shared by its threads: `net` (sockets, listeners, wake sources, quotas),
+`fs` (handles, quota, cwd; calls are serialised by a lock), `kv` (handles), `process` (args, env, one stdin), the `log`
+budget (one budget per invocation for all threads). `clock` has one timeline. `random` is stateless. Handles opened in one
+thread work in every other. Host-call counters and `bytes_logged` of finished threads are added to the isolate's
+metrics.
+
+**Termination.** The first of these ends *all* threads of the isolate and fails the invocation with that thread's error:
+a trap (or the exit idiom: the guest records its status and traps, and the main instance's `orin_exit_status` reads
+it from shared memory), `proc_exit`, running out of fuel, the wall-clock deadline. Every thread is stopped wherever it
+is: running wasm by the epoch callback (the engine epoch is bumped immediately); suspended in a net wait because its
+future is dropped; **blocked in `memory.atomic.wait32/64` because the supervisor notifies every 4-byte-aligned address
+of the memory**, repeatedly, until no thread is left (Wasmtime cannot interrupt a wait otherwise). A pass costs O(memory
+size), and starts 3 epoch ticks after the termination so cheap cases finish first. No
+host `wait` / `notify` imports are needed or provided; guests use the instructions. The deadline is also enforced for threads blocked in a wait.
+
+**End of a run.** A run is one `init` or `invoke`. When the main thread returns, threads still alive are terminated
+(not waited for) and the call returns after they are gone; a clean main result stays the result. The Orin L0 joins its
+tasks first, so none should be left. Threads from different invocations never overlap.
+
+**Limits.** Fuel is per Store: every thread gets the same budget (`Limits::fuel`) per invocation, so a run may consume
+up to (threads + 1) times it; the reported `fuel_consumed` is the sum. The timeout is one absolute deadline for all
+threads. The memory limit covers the shared memory. One invocation permit is held for the whole threaded call, so the
+runtime's `max_concurrent_invocations` does not bound the number of busy OS threads; `max_threads` does. With the
+pooling allocator every thread instance takes one `max_instances` slot and one fiber stack. A threaded artifact is only
+poolable with `ReusePolicy::FreshPerAcquire` (`Reuse` is refused: `ThreadsCannotBeReused`).
+
 ## 5. Guest exports
 
 | Export | Required | Meaning |
@@ -357,6 +419,7 @@ publish_batch(q_ptr: i64, q_len: i64, buf_ptr: i64, buf_len: i64) -> i32
 | `_start` | no | WASI command entry point; `orbit run` without `--invoke` calls it and exits with the guest's `proc_exit` code (0 if it returns) |
 | `orin_main() -> i32` | no | Orin convention ([orin-integration.md](orin-integration.md) section 2a): the program entry point. `orbit run` without `--invoke` and without `_start` calls it and exits with its result (a non-zero status that wraps to 0 modulo 256 becomes 1) |
 | `orin_exit_status() -> i32` | no | Orin convention: after `orin_main` trapped, the exit status the program set, or `-1` for a genuine trap. Read once by `orbit run` (library: `Isolate::post_mortem_i32`) |
+| `orin_thread_start(tid: i64, arg: i64)` | with `orbit:thread/v1` | entry of every spawned thread (section 4f) |
 | `orbit_init` | no | called once after `_initialize`; a trap or a non-zero `i32` result fails initialisation |
 | any function | — | invocable by name with integer arguments |
 | `orbit_alloc(size: i64) -> i64` | *reserved* | for host-to-guest payloads in a later version. Servers do not need it: an Orin server is a normal program that listens and accepts through `orbit:net/v1` ([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)) |
@@ -390,7 +453,7 @@ At load the host:
 2. rejects every import whose module is not a capability the host knows at that major version: an `orbit:` module, or
    `wasi_snapshot_preview1` for the functions listed in section 4a (arbitrary `env` imports and any other WASI
    function are rejected);
-3. rejects imports that are not functions (imported memories, tables and globals are not part of ABI v1);
+3. rejects imports that are not functions, except the one shared `env.memory` of section 4f (other imported memories, tables and globals are not part of ABI v1);
 4. checks the import's signature against the capability's definition, and that a wasm32-only capability (WASI) is not
    imported by a module with a 64-bit memory;
 5. at instantiation, checks that the instance's grant includes every required capability — a denied capability

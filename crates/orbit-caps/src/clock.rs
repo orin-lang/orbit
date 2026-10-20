@@ -196,6 +196,22 @@ impl Capability for ClockCapability {
         Ok(())
     }
 
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        // The same base: `monotonic_nanos` is one timeline for all threads of the isolate.
+        match parent.downcast_ref::<ClockState>() {
+            Some(s) => Box::new(ClockState {
+                base: s.base,
+                resolution_ns: s.resolution_ns,
+            }),
+            None => self.instance_state(info, config),
+        }
+    }
+
     fn instance_state(
         &self,
         _info: &InstanceInfo,

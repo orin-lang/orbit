@@ -38,8 +38,8 @@ imports are only the target of L0, the one layer of the Orin runtime that differ
 | `std:path` | path_absolute, path_real | `orbit:fs/v1` cwd, realpath | (with fs) | done |
 | `std:net`, `std:http` | net_narrow, tcp_listen, tcp_accept, tcp_connect, stream_recv, stream_send, net_shutdown, net_close, dns_resolve | `orbit:net/v1` | `--grant net:listen=127.0.0.1:8080`, `--grant net:connect=*.example.com:443`, `--listen` | done (net_narrow stays pure in L0) |
 | `std:task` cancellation | wake_open, wake_close, wake_signal, wake_check, wake_bind, wake_bound | `orbit:net/v1` wake_* | (with net) | L0-local flags; waits pass wake 0. With one thread a token is never set while a host call blocks, and host wake_* would import net/v1 into every task program. Revisit with orbit:thread/v1 |
-| `std:task` tasks | thread_create, thread_join, thread_exit, thread_id, cpu_count | `orbit:thread/v1` spawn + export `orin_thread_start` | `--grant thread/v1` | **proposed, not built** |
-| `std:task` monitors | monitor_* | `memory.atomic.wait32` / `notify` on shared memory, no import | none | **proposed, L0 only** |
+| `std:task` tasks | thread_create, thread_join, thread_exit, thread_id, cpu_count | `orbit:thread/v1` spawn + export `orin_thread_start` | `--grant thread/v1`, `--max-threads N` | Orbit done, L0 pending |
+| `std:task` monitors | monitor_* | `memory.atomic.wait32` / `notify` on shared memory, no import | none (with thread/v1) | Orbit done (terminable), L0 pending |
 | `std:host` shell | shell, shell_timeout | none | none | not available: returns -1 |
 
 ## Signatures
@@ -90,17 +90,22 @@ wake_open(parent:i64) -> i64           wake_signal(h) -> i32    wake_check(h) ->
 
 `wake` is 0 or a wake handle. L0 keeps `wake_bind` / `wake_bound` itself and passes the bound handle to every waiting call.
 
-`orbit:thread/v1` (proposed, agreed with the Orin wasm thread, not yet built in Orbit):
+`orbit:thread/v1` (host-abi.md section 4f, ADR-0012):
 
 ```
-spawn(arg:i64) -> i64                  tid > 0 or a status
-guest export orin_thread_start(tid:i64, arg:i64)
+spawn(arg:i64) -> i64                  tid > 0, or ERR_QUOTA / ERR_DENIED / ERR_CANCELLED
+guest export orin_thread_start(tid:i64, arg:i64)       (i64, i64) -> ()
 ```
 
 The module imports its memory as shared `env.memory` (wasm32, declared max 65536 pages); Orbit provides a
-`SharedMemory` whose max is the isolate's memory limit. Each thread is a separate instance on that memory; exit or a
-trap in any thread ends all of them. Net, fs and process state is per isolate and shared by its threads. Modules without
-threads (exported, unshared memory) stay valid and keep the run-on-block scheduler.
+`SharedMemory` whose max is the isolate's memory limit. Each thread is a separate instance on that memory with its own
+OS thread; exit or a trap in any thread ends all of them (blocked `atomic.wait` included). Net, fs, kv, process and log
+state is per isolate and shared by its threads. Modules without threads (exported, unshared memory) stay valid and keep
+the run-on-block scheduler. L0 must: use passive data segments (`--shared-memory`), switch to a private stack and run
+`__wasm_init_tls` at the top of `orin_thread_start`, keep the exit status in shared memory (not a wasm global, which is
+per instance) so `orin_exit_status` of the main instance sees it, and join its tasks before `orin_main` returns
+(leftover threads are terminated). A start function must be idempotent (wasm-ld's `__wasm_init_memory` is). Link flags:
+`--shared-memory --import-memory --max-memory=4294967296`. No `wait`/`notify` host imports are needed.
 
 ## Queues: not part of std (`orbit:queue/v1`)
 
@@ -160,4 +165,4 @@ The host never returns error text; `orin_platform_error_message` stays in L0.
 ## Not available
 
 mkdir, chmod, processes (`shell`), UDP, TLS, and a poll over several sockets. A single-threaded guest
-serves one connection at a time until `orbit:thread/v1` exists.
+serves one connection at a time; with `orbit:thread/v1` an L0 can run a task per connection.

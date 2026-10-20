@@ -25,5 +25,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 name = "runtime"
 harness = false
 
-[lints]
-workspace = true
+# `unsafe_code` is `deny` instead of the workspace's `forbid` because exactly one module
+# (`shared_mem.rs`) needs it: byte copies in and out of a shared linear memory. See security.md.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

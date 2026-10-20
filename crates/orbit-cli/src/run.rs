@@ -7,7 +7,7 @@ use orbit_abi::CapabilityId;
 use orbit_caps::{
     ClockCapability, FsCapability, FsGrant, HostStdin, InMemoryKv, KvCapability, LogCapability,
     MountMode, NetCapability, ProcessCapability, ProcessGrant, RandomCapability, StderrSink,
-    WasiCapability, net_grant_config,
+    ThreadCapability, WasiCapability, net_grant_config,
 };
 use orbit_runtime::{CapabilityRegistry, ExecError, Grants, Limits, Runtime, RuntimeConfig};
 
@@ -71,6 +71,10 @@ pub struct RunArgs {
     /// Maximum total bytes the guest may write through `orbit:fs/v1`; default unlimited.
     #[arg(long, value_name = "BYTES")]
     fs_max_write_bytes: Option<u64>,
+    /// Maximum guest threads alive at once besides the main thread, for a module granted
+    /// `thread/v1` (default 64). Grants `thread/v1`.
+    #[arg(long, value_name = "N")]
+    max_threads: Option<usize>,
     /// Maximum linear memory in bytes.
     #[arg(long, value_name = "BYTES")]
     max_memory: Option<u64>,
@@ -106,6 +110,7 @@ pub fn registry() -> CapabilityRegistry {
         ))
         .with(wasi)
         .with(FsCapability::new())
+        .with(ThreadCapability::new())
         .with(ProcessCapability::new().with_stdin(HostStdin::new()))
 }
 
@@ -172,6 +177,7 @@ pub async fn run(args: RunArgs) -> Result<i32> {
     let mut fs_plain = false;
     let mut stdin = false;
     let mut process_plain = false;
+    let mut thread_seen = false;
     for g in &args.grants {
         if let Some((kind, scope)) = g
             .strip_prefix("net:")
@@ -212,7 +218,10 @@ pub async fn run(args: RunArgs) -> Result<i32> {
             process_plain = true;
             continue;
         }
-        grants = if id == CapabilityId::kv_v1() {
+        grants = if id == CapabilityId::thread_v1() {
+            thread_seen = true;
+            grants
+        } else if id == CapabilityId::kv_v1() {
             grants.grant_with(id, serde_json::json!({ "namespaces": args.kv_namespaces }))
         } else if id == CapabilityId::queue_v1() {
             grants.grant_with(id, serde_json::json!({ "publish": args.publish_queues }))
@@ -221,6 +230,13 @@ pub async fn run(args: RunArgs) -> Result<i32> {
         } else {
             grants.grant(id)
         };
+    }
+    if thread_seen || args.max_threads.is_some() {
+        let config = args.max_threads.map_or(
+            serde_json::Value::Null,
+            |n| serde_json::json!({ "max_threads": n }),
+        );
+        grants = grants.grant_with(CapabilityId::thread_v1(), config);
     }
     for scope in &args.listen {
         orbit_caps::NetScope::parse(scope).map_err(|e| anyhow::anyhow!("bad --listen: {e}"))?;

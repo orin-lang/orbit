@@ -7,6 +7,14 @@ use crate::IsolateState;
 /// Why a module could not be loaded as an [`Artifact`](crate::Artifact).
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
+    /// The module imports `env.memory` but not as a shared 32-bit memory, or it defines a
+    /// shared memory of its own. Threads need `(import "env" "memory" (memory N MAX shared))`.
+    #[error("bad shared memory: {0}")]
+    BadSharedMemory(String),
+    /// The module uses `orbit:thread/v1` in a way the host cannot support (no shared memory
+    /// import, no `orin_thread_start`, active data segments, ...).
+    #[error("invalid thread module: {0}")]
+    ThreadModule(String),
     /// The bytes are neither valid WebAssembly nor valid WAT.
     #[error("invalid module: {0}")]
     Invalid(String),
@@ -127,6 +135,10 @@ pub enum InstantiateError {
         "Limits::fuel is set but fuel metering is disabled in this runtime (EngineConfig::fuel_metering)"
     )]
     FuelMeteringDisabled,
+    /// A pool with [`ReusePolicy::Reuse`](crate::ReusePolicy::Reuse) was requested for a
+    /// module that imports a shared memory (threads). Such an isolate is never reused.
+    #[error("an isolate with guest threads is never reused: use ReusePolicy::FreshPerAcquire")]
+    ThreadsCannotBeReused,
     /// Instantiation failed for another reason (for example the start function trapped).
     #[error("instantiation failed: {0}")]
     Instantiate(String),

@@ -35,6 +35,13 @@ pub const INITIALIZE_EXPORT: &str = "_initialize";
 /// Optional export called after `_initialize`; a trap or non-zero `i32` result fails init.
 pub const INIT_EXPORT: &str = "orbit_init";
 
+/// Import module and field of the shared linear memory a threaded guest imports
+/// (`(import "env" "memory" (memory N 65536 shared))`, `docs/host-abi.md` section 4f).
+pub const SHARED_MEMORY_IMPORT: (&str, &str) = ("env", "memory");
+/// Export a guest with `orbit:thread/v1` must provide: `(tid: i64, arg: i64)`, no result. The
+/// host calls it in every new thread instance.
+pub const THREAD_START_EXPORT: &str = "orin_thread_start";
+
 /// Size limits that are part of the ABI contract.
 pub mod limits {
     /// Maximum size of one `orbit:log/v1` message.
@@ -76,6 +83,11 @@ pub mod limits {
     pub const FS_MAX_IO_BYTES: u64 = 1024 * 1024;
     /// Default number of open `orbit:fs/v1` handles (files and directories) per instance.
     pub const FS_DEFAULT_MAX_HANDLES: usize = 64;
+    /// Default number of guest threads one isolate may have alive besides its main thread
+    /// (`orbit:thread/v1`, grant key `max_threads`).
+    pub const THREAD_DEFAULT_MAX_THREADS: usize = 64;
+    /// Largest `max_threads` a grant may configure (larger values are clamped).
+    pub const THREAD_MAX_THREADS_CEILING: usize = 1024;
     /// Bit set in the result of `fs.dir_next` when the entry is a directory.
     pub const FS_DIR_FLAG: i64 = 0x4000_0000_0000_0000;
 }

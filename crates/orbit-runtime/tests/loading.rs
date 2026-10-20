@@ -37,8 +37,9 @@ fn unknown_imports_are_rejected() {
 #[test]
 fn non_function_imports_are_rejected() {
     let (rt, _) = runtime();
+    // An unshared `env.memory` has its own, clearer error (only a shared one is provided).
     let e = err(&rt, r#"(module (import "env" "memory" (memory 1)))"#);
-    assert!(matches!(e, LoadError::UnknownImport { .. }), "{e}");
+    assert!(matches!(e, LoadError::BadSharedMemory(_)), "{e}");
     for (decl, kind) in [
         ("(memory 1)", "memory"),
         ("(table 1 funcref)", "table"),

@@ -826,6 +826,19 @@ impl Capability for NetCapability {
     ) -> Box<dyn Any + Send> {
         Box::new(NetState(Arc::new(NetShared::new(info, config))))
     }
+
+    fn thread_state(
+        &self,
+        parent: &mut (dyn Any + Send),
+        info: &InstanceInfo,
+        config: &serde_json::Value,
+    ) -> Box<dyn Any + Send> {
+        // Sockets, wake sources, scopes and quotas of the isolate, shared by all its threads.
+        match parent.downcast_ref::<NetState>() {
+            Some(s) => Box::new(NetState(Arc::clone(&s.0))),
+            None => self.instance_state(info, config),
+        }
+    }
 }
 
 #[cfg(test)]

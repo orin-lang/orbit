@@ -15,7 +15,7 @@ publish = false
 orbit-abi = { path = "crates/orbit-abi" }
 orbit-runtime = { path = "crates/orbit-runtime" }
 orbit-caps = { path = "crates/orbit-caps" }
-wasmtime = { version = "49", default-features = false, features = ["cranelift", "async", "pooling-allocator", "runtime", "wat", "std"] }
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "async", "pooling-allocator", "runtime", "wat", "std", "threads"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 anyhow = "1"
 thiserror = "2"

@@ -616,3 +616,52 @@ fn stdin_needs_the_process_stdin_grant() {
     let o = run(&["--app-arg", "x"]);
     assert_eq!(stdout(&o).trim(), "-2");
 }
+
+#[test]
+fn run_threads_needs_the_grant_and_honours_max_threads() {
+    let m = path("threads.wasm");
+    let o = orbit(&[
+        "run", &m, "--invoke", "count", "--arg", "4", "--arg", "1000", "--grant", "log/v1",
+    ]);
+    assert!(!o.status.success());
+    assert!(
+        stderr(&o).contains("capability not granted: thread/v1"),
+        "{}",
+        stderr(&o)
+    );
+
+    let o = orbit(&[
+        "run",
+        &m,
+        "--invoke",
+        "count",
+        "--arg",
+        "4",
+        "--arg",
+        "1000",
+        "--grant",
+        "log/v1",
+        "--grant",
+        "thread/v1",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "4000");
+
+    // max_threads 2: the third spawn fails, so `count` reports -1.
+    let o = orbit(&[
+        "run",
+        &m,
+        "--invoke",
+        "count",
+        "--arg",
+        "3",
+        "--arg",
+        "1000",
+        "--grant",
+        "log/v1",
+        "--max-threads",
+        "2",
+    ]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "-1");
+}

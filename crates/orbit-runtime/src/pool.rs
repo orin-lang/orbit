@@ -796,6 +796,9 @@ impl Runtime {
         config: PoolConfig,
     ) -> Result<InstancePool, InstantiateError> {
         self.check_grants(artifact, grants)?;
+        if artifact.shared_memory().is_some() && matches!(config.reuse, ReusePolicy::Reuse { .. }) {
+            return Err(InstantiateError::ThreadsCannotBeReused);
+        }
         if limits.fuel.is_some() && !self.engine().fuel_metering() {
             return Err(InstantiateError::FuelMeteringDisabled);
         }
