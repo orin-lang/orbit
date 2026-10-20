@@ -19,7 +19,7 @@ one code cache and host-managed infrastructure, while each instance keeps its ow
    Capability   trait: id + link into a Linker; guest-memory helpers with checked bounds
                                                         │
  orbit-caps ────────────────────────────────────────────┼──────────────────────────────────────────────────
-   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:fs/v1  orbit:process/v1  wasi_p1/v1
+   contracts    orbit:log/v1  orbit:clock/v1  orbit:random/v1  orbit:kv/v1  orbit:fs/v1  orbit:process/v1  orbit:thread/v1  wasi_p1/v1
    adapters     LogSink (stderr, memory)   KvStore (in-memory, tenant-scoped)   ... later: Postgres pool, Kafka, S3
                                                         │
  orbit-abi ─────────────────────────────────────────────┴──────────────────────────────────────────────────
@@ -107,6 +107,17 @@ Handles (KV namespaces, later files, sockets, streams) live in a per-instance ha
 never a host pointer. A handle from another instance or a closed handle is `ERR_BAD_HANDLE`; terminating an instance
 drops its table.
 
+## Guest threads
+
+A module that imports a shared `env.memory` is a *threaded* module ([host-abi.md](host-abi.md) section 4e,
+[ADR-0012](adr/0012-guest-threads-on-shared-memory.md)). Its isolate owns one `SharedMemory` and a `ThreadShared`
+(phase, supervisor, quotas). `orbit:thread/v1` `spawn` creates a new Store and instance of the same module on that memory,
+with capability state derived from the spawning thread's through `Capability::thread_state` (shared `Arc`s for net, fs,
+kv, process and the log budget), and runs `orin_thread_start` on its own OS thread under `Handle::block_on`. The main thread
+of an invocation runs on a dedicated OS thread as well; the caller's task awaits it. A supervisor thread per invocation
+enforces the deadline for blocked threads and wakes `atomic.wait` waiters while terminating. Isolates without a shared
+memory keep the single-Store, task-based model above.
+
 ## Network path
 
 A server is an ordinary guest. `orbit:net/v1` ([host-abi.md](host-abi.md) section 4d) gives it L0-shaped TCP calls; the
@@ -134,4 +145,4 @@ never across an `await`. A host can cancel from outside through `NetController::
 See [adr/](adr/): Wasmtime (0001), a core-wasm ABI before the Component Model (0002), deny-by-default linking and
 manifests as description (0003), 64-bit pointers in the ABI (0004), async isolates with epoch time slices (0005),
 shared adapters with per-instance handles (0006), the restricted WASI preview 1 shim (0007), fuel metering opt-in
-(0008), instance pools fresh by default (0009).
+(0008), instance pools fresh by default (0009), guest threads on a shared memory (0012).

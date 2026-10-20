@@ -36,8 +36,8 @@ Revised: unchanged Orin `std:net` / `std:http` code must run, so Orbit offers th
 ABI ([ADR-0010](adr/0010-network-capability-mirrors-the-orin-l0-tcp-layer.md)).
 1. ~~`orbit:net/v1`~~ **done**: TCP listen/accept/connect/recv/send, DNS, wake sources, scope grants, async waits.
    `orbit run app.wasm --listen 127.0.0.1:8080` serves with a guest-written server.
-2. `orbit:thread/v1` (several guest threads of one isolate on a shared memory) so one isolate serves connections
-   concurrently; the network state is already per isolate, not per store.
+2. ~~`orbit:thread/v1`~~ **done** (Orbit side; Orin L0 pending): several guest threads of one isolate on a shared memory,
+   isolate-wide termination, per-isolate capability state ([ADR-0012](adr/0012-guest-threads-on-shared-memory.md)).
 3. TLS and UDP; `poll` over several sockets; outgoing connection pool behind `connect`.
 4. An `Invocation` abstraction and timers (`orbit:timer/v1`) for batch/message workloads (the `orbit_alloc` export stays
    reserved for it).

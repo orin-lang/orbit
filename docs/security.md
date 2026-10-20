@@ -17,6 +17,7 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 | tenant separation in shared adapters | adapters are keyed by tenant chosen by the host, never by the guest | KV tenant tests |
 | file system confinement | `fs/v1` resolves every path against preopened mounts: lexical normalisation in virtual space, then `cap-std` (`openat`-style, no ambient paths) inside the mount; read-only mounts refuse writes before any OS call; handles are per instance, quotas on handles and bytes | `crates/orbit-caps/tests/fs.rs` (escape, symlink, ro, handle, quota tests) |
 | no ambient process state | `process/v1` serves only the argv/env in the grant; stdin only with its own grant | `crates/orbit-caps/tests/process.rs`, `crates/orbit-cli/tests/cli.rs` |
+| guest threads (`orbit:thread/v1`) | deny by default; `max_threads` per isolate; one Store per thread with the isolate's grants; capability state shared per isolate (one handle table, one log budget); a trap, exit, fuel or deadline failure in any thread ends all; wait-blocked threads are woken by a memory sweep | `crates/orbit-runtime/tests/threads.rs` |
 | cleanup | a trapped isolate is `Failed`, refuses work, and its store is dropped on terminate | cleanup tests |
 
 ## Assumptions (trusted computing base)
@@ -24,7 +25,7 @@ Do not run mutually distrusting tenants on one Orbit process on the strength of 
 * **Wasmtime and Cranelift are correct.** A miscompilation or a sandbox escape in the engine breaks every guarantee
   above. Mitigation path: track Wasmtime security advisories, keep the version current, fuzz the host ABI.
 * **The host capability code is correct.** It is ordinary Rust running with the process's full authority. It is kept
-  small, uses no `unsafe` (`#![forbid(unsafe_code)]` in every Orbit crate), and validates every guest value.
+  small, uses no `unsafe` except one module of `orbit-runtime` (`shared_mem.rs`: relaxed atomic byte copies in and out of a shared linear memory; `unsafe_code` is `deny` there and `forbid` in every other crate), and validates every guest value.
 * **The process boundary is the real security boundary.** WebAssembly isolation does not protect against
   side channels (Spectre-class, timing, cache), against bugs in the engine, or against resource exhaustion of
   shared host resources that Orbit does not yet meter.
@@ -52,6 +53,22 @@ Not defended: a hostile host administrator who changes mount directories during 
 outside the mount can be created by whoever owns the mount directory, and a hard link is just a file); mounting a
 directory that contains secrets is the operator's decision. Use a separate Orbit process per trust domain for
 mutually distrusting tenants.
+
+## Guest threads (`orbit:thread/v1`)
+
+* Threads are real OS threads: `max_threads` (default 64) bounds them per isolate, but the runtime's invocation
+  semaphore counts a threaded invocation once, so N isolates with 64 threads each can run 64N busy threads. Always set a
+  timeout and a thread limit in multi-tenant use.
+* Fuel is per thread (each Store gets the full budget), so total work is up to (threads + 1) times `Limits::fuel`.
+* Memory is one limited shared memory; `memory.grow` failure is not counted in `memory_grow_denied`.
+* Termination of a thread blocked in `memory.atomic.wait*` works by notifying every aligned address of the memory
+  repeatedly (O(memory) per pass): reliable, but a large memory limit makes it slow and a woken
+  thread still has to reach an epoch check. A thread inside a long non-yielding host call (blocking file I/O, `fs` lock
+  held by another thread) ends only when that call returns.
+* A host copy into or out of shared memory (`recv`, `fs.read`) races with guest threads by nature; copies are
+  relaxed-atomic, so the guest sees possibly torn data, never host memory corruption.
+* WebAssembly's data races between guest threads are defined, but a guest can still deadlock itself; deadlocks end at the deadline.
+* The wasi shim cannot be combined with threads.
 
 ## Known limitations
 

@@ -10,7 +10,7 @@ use orbit_abi::CapabilityId;
 use orbit_caps::{LogCapability, LogRecord, LogSink};
 use orbit_runtime::{
     Artifact, CapabilityRegistry, EngineConfig, Grants, Limits, PoolConfig, PoolingConfig,
-    ReusePolicy, Runtime, RuntimeConfig,
+    ReusePolicy, Runtime, RuntimeConfig, ThreadCapability,
 };
 use std::time::{Duration, Instant};
 
@@ -494,11 +494,66 @@ fn bench_pool(c: &mut Criterion) {
     g.finish();
 }
 
+/// `orbit:thread/v1`: what a spawn costs. `spawn_join_1` is one guest `spawn` of a thread that
+/// does nothing plus waiting for it to finish (new OS thread, new store, instantiation of the
+/// module, `orin_thread_start`, exit); `invoke_size` is the same threaded isolate's call with no
+/// spawn (the main thread runs on its own OS thread too), as the baseline.
+fn bench_threads(c: &mut Criterion) {
+    let tk = tokio_rt();
+    let rt = Runtime::new(
+        RuntimeConfig::default(),
+        CapabilityRegistry::new()
+            .with(LogCapability::new(NullSink))
+            .with(ThreadCapability::new()),
+    )
+    .expect("runtime");
+    let art = rt
+        .load(include_bytes!("../tests/fixtures/threads/threads.wasm"))
+        .expect("load");
+    let grants = Grants::none()
+        .grant(CapabilityId::log_v1())
+        .grant(CapabilityId::thread_v1());
+    let iso = tokio::sync::Mutex::new(tk.block_on(async {
+        let mut i = rt
+            .spawn_isolate(&art, "bench", &grants, Limits::default())
+            .await
+            .expect("spawn");
+        i.init().await.expect("init");
+        i
+    }));
+    let mut g = c.benchmark_group("threads");
+    g.bench_function("invoke_size", |b| {
+        b.to_async(&tk)
+            .iter(|| async { iso.lock().await.invoke("size", &[]).await.expect("invoke") });
+    });
+    g.bench_function("spawn_join_1", |b| {
+        b.to_async(&tk).iter(|| async {
+            iso.lock()
+                .await
+                .invoke("spawn_join", &[1])
+                .await
+                .expect("invoke")
+        });
+    });
+    g.bench_function("isolate_spawn_init_terminate", |b| {
+        b.to_async(&tk).iter(|| async {
+            let mut i = rt
+                .spawn_isolate(&art, "bench", &grants, Limits::default())
+                .await
+                .expect("spawn");
+            i.init().await.expect("init");
+            i.terminate();
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_load,
     bench_instance,
     bench_invoke,
-    bench_pool
+    bench_pool,
+    bench_threads
 );
 criterion_main!(benches);
